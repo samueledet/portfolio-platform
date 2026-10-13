@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portfolio Construction Platform</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap topbar">
+      <span class="brand">Portfolio Construction Platform</span>
+      <span class="status">Prototype</span>
+      <span class="ds-chip" id="dsChip" hidden></span>
+      <span style="flex:1"></span>
+      <button id="exportBtn" class="btn ghost" type="button" hidden>Export Excel</button>
+      <button id="themeToggle" class="btn ghost" type="button" aria-label="Toggle light or dark theme">Theme</button>
+    </div>
+    <nav class="wrap tabs steps" id="steps" aria-label="Workflow steps">
+      <button type="button" data-step="data" class="on">1 Data</button>
+      <button type="button" data-step="assume" disabled>2 Assumptions</button>
+      <button type="button" data-step="optimise" disabled>3 Optimise</button>
+      <button type="button" data-step="backtest" disabled>4 Backtest</button>
+      <button type="button" data-step="stress" disabled>5 Stress test</button>
+      <button type="button" data-step="simulate" disabled>6 Simulate</button>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <div id="banner" class="banner" role="alert" hidden></div>
+
+    <section id="settings" class="card controls" hidden aria-label="Analysis settings">
+      <label>Analysis start <input id="gStart" type="date"></label>
+      <label>Analysis end <input id="gEnd" type="date"></label>
+      <label>Risk-free rate (% a year) <input id="gRf" type="number" step="0.05" value="0"></label>
+      <button id="gApply" class="btn ghost" type="button">Apply</button>
+      <p class="hint" id="gHint"></p>
+    </section>
+
+    <!-- 1 DATA -->
+    <div class="panel" id="p-data">
+      <section class="card">
+        <h2>Upload your data</h2>
+        <p class="sub">A CSV or Excel file with dates in the first column and one column per asset. Values can be prices or returns; the type and frequency are detected and you can override them.</p>
+        <div class="upload" id="drop">
+          <input id="file" type="file" accept=".csv,.txt,.xlsx,.xlsm,.xls" hidden>
+          <button id="pick" class="btn" type="button">Choose a file</button>
+          <span class="muted">or drop it here</span>
+          <label>Values <select id="upKind"><option value="auto">Detect</option><option value="prices">Prices</option><option value="returns">Returns</option></select></label>
+          <label>Frequency <select id="upFreq"><option value="auto">Detect</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option></select></label>
+        </div>
+        <p class="sub small" style="margin-top:12px">No file to hand? Try a sample: <span id="samples"></span></p>
+      </section>
+      <div id="dataOut" hidden>
+        <section class="kpis" id="dataKpis"></section>
+        <section class="card"><h2>Growth of 100</h2><div id="growthLegend" class="legend"></div><div id="growthChart" class="chart"></div></section>
+        <section class="card"><h2>Return and risk statistics</h2><p class="sub" id="statsSub"></p><div class="table-wrap"><table id="statsTable" class="data"></table></div></section>
+        <section class="card"><h2>Correlation</h2><div class="table-wrap"><table id="corrTable" class="data matrix"></table></div><div id="corrScale" class="scale"></div></section>
+        <section class="card"><h2>Distribution of returns</h2><p class="sub">One panel per asset on a shared scale.</p><div id="histGrid" class="grid-3"></div></section>
+      </div>
+    </div>
+
+    <!-- 2 ASSUMPTIONS -->
+    <div class="panel" id="p-assume" hidden>
+      <section class="card">
+        <h2>Capital market assumptions</h2>
+        <p class="sub">Choose where expected returns and risk come from. Historical values are computed from your data. Switch to custom to type your own forecasts. Correlations come from your data.</p>
+        <div class="controls inner">
+          <label>Source <select id="aSource"><option value="historical">Historical data</option><option value="custom">Custom forecasts</option></select></label>
+          <label>Annualise means <select id="aMethod"><option value="arithmetic">Mean × periods</option><option value="compound">(1 + mean)^periods − 1</option></select></label>
+          <label>Covariance <select id="aCov"><option value="sample">Sample</option><option value="shrinkage">Shrinkage (Ledoit–Wolf)</option></select></label>
+          <label>Scenario <select id="aScenario"><option value="1,1">Base case</option><option value="1.1,0.9">Optimistic (+10% return, −10% risk)</option><option value="0.9,1.1">Pessimistic (−10% return, +10% risk)</option><option value="custom">Custom tilt</option></select></label>
+          <label>Return × <input id="aRetMult" type="number" step="0.05" value="1" min="0"></label>
+          <label>Risk × <input id="aVolMult" type="number" step="0.05" value="1" min="0.05"></label>
+        </div>
+        <div class="table-wrap"><table id="assumeTable" class="data inputs"></table></div>
+      </section>
+      <section class="card">
+        <h2>Constraints</h2>
+        <p class="sub">Minimum and maximum weight for each asset are set in the table above. Group limits cap or floor the combined weight of several assets, for example all equities.</p>
+        <div id="groups"></div>
+        <button id="addGroup" class="btn ghost" type="button">Add a group limit</button>
+        <div class="toolbar" style="margin-top:16px"><button id="aApply" class="btn" type="button">Apply and continue to optimise</button><span class="muted" id="aNote"></span></div>
+      </section>
+    </div>
+
+    <!-- 3 OPTIMISE -->
+    <div class="panel" id="p-optimise" hidden>
+      <section class="card">
+        <div class="row-between"><h2>Efficient frontier</h2><button id="runFrontier" class="btn" type="button">Run optimiser</button></div>
+        <p class="sub">The curve shows the lowest-risk portfolio for each level of return under your constraints. Markers are reference portfolios. Hover for weights.</p>
+        <div id="frontLegend" class="legend"></div>
+        <div id="frontChart" class="chart"></div>
+        <div id="frontNotes"></div>
+      </section>
+      <section class="card">
+        <h2>Portfolios</h2>
+        <p class="sub">These portfolios carry into the backtest, stress test and simulation steps. Add an optimised portfolio for a specific objective, or type your own weights.</p>
+        <div class="controls inner">
+          <label>Objective <select id="oObjective"><option value="target_volatility">Maximise return at a risk limit</option><option value="target_return">Minimise risk for a target return</option><option value="max_sharpe">Maximum Sharpe ratio</option><option value="min_variance">Minimum variance</option><option value="max_return">Maximum return</option><option value="risk_parity">Risk parity</option></select></label>
+          <label id="oTargetLab">Target (% a year) <input id="oTarget" type="number" step="0.5" value="10"></label>
+          <label>Name <input id="oName" type="text" placeholder="e.g. SAA 10% risk" style="width:170px"></label>
+          <button id="oAdd" class="btn ghost" type="button">Add optimised portfolio</button>
+          <button id="oCustom" class="btn ghost" type="button">Add custom weights</button>
+        </div>
+        <div id="portLegend" class="legend"></div>
+        <div id="portBars" class="chart"></div>
+        <div class="table-wrap"><table id="portTable" class="data"></table></div>
+      </section>
+    </div>
+
+    <!-- 4 BACKTEST -->
+    <div class="panel" id="p-backtest" hidden>
+      <section class="card">
+        <div class="row-between"><h2>Backtest</h2><button id="runBacktest" class="btn" type="button">Run backtest</button></div>
+        <p class="sub">Applies each portfolio's weights to the actual returns in your data over the analysis period.</p>
+        <div class="controls inner">
+          <label>Rebalance <select id="bRebalance"><option value="every_period">Every period</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annually</option><option value="never">Never (buy and hold)</option></select></label>
+          <label>Trading cost (bps) <input id="bCost" type="number" step="1" value="0" min="0"></label>
+          <label>Benchmark <select id="bBench"></select></label>
+        </div>
+        <div id="btOut" hidden>
+          <h3>Growth of 1</h3><div id="btLegend" class="legend"></div><div id="btWealth" class="chart"></div>
+          <h3>Drawdown</h3><div id="btDd" class="chart"></div>
+          <div class="table-wrap"><table id="btTable" class="data"></table></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 5 STRESS -->
+    <div class="panel" id="p-stress" hidden>
+      <section class="card">
+        <div class="row-between"><h2>Historical stress windows</h2><button id="runStress" class="btn" type="button">Run stress test</button></div>
+        <p class="sub">How the chosen portfolio behaved in crisis periods covered by your data, plus its own worst drawdown.</p>
+        <div class="controls inner">
+          <label>Portfolio <select id="sPort"></select></label>
+          <label>Custom window start <input id="sStart" type="date"></label>
+          <label>end <input id="sEnd" type="date"></label>
+        </div>
+        <div id="stressOut" hidden>
+          <div class="table-wrap"><table id="stressTable" class="data"></table></div>
+          <h3 style="margin-top:16px">Portfolio path through each window</h3>
+          <div id="stressLegend" class="legend"></div><div id="stressChart" class="chart"></div>
+        </div>
+      </section>
+      <section class="card" id="shockCard" hidden>
+        <h2>Shock severity</h2>
+        <p class="sub">Stressed asset return = base assumption + severity × (return in the window − base assumption). 1× reproduces the window; 2× is twice as severe.</p>
+        <div class="toolbar">
+          <label>Shock window <select id="shWindow"></select></label>
+          <label for="shSev">Severity <input id="shSev" type="range" min="0" max="3" step="0.05" value="1"> <span class="readout" id="shOut"></span></label>
+        </div>
+        <div class="kpis kpis-inline" id="shKpis"></div>
+        <div class="two-col">
+          <div><h3>Asset returns: base vs stressed</h3><div id="shLegend" class="legend"></div><div id="shBars" class="chart"></div></div>
+          <div><h3>Portfolio return as the shock deepens</h3><div id="shLine" class="chart"></div></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 6 SIMULATE -->
+    <div class="panel" id="p-simulate" hidden>
+      <section class="card">
+        <div class="row-between"><h2>Monte Carlo simulation</h2><button id="runSim" class="btn" type="button">Run simulation</button></div>
+        <p class="sub">Projects the portfolio forward using your assumptions. Normal and fat-tailed draws use the expected returns and covariance; bootstrap resamples blocks of your actual history.</p>
+        <div class="controls inner">
+          <label>Portfolio <select id="mPort"></select></label>
+          <label>Horizon (years) <input id="mYears" type="number" step="1" value="5" min="0.25"></label>
+          <label>Trials <select id="mTrials"><option>1000</option><option selected>5000</option><option>20000</option></select></label>
+          <label>Method <select id="mMethod"><option value="normal">Normal</option><option value="student_t">Fat tails (Student-t)</option><option value="bootstrap">Bootstrap history</option></select></label>
+          <label>Seed <input id="mSeed" type="number" step="1" value="42" min="0"></label>
+        </div>
+        <div id="simOut" hidden>
+          <div class="kpis kpis-inline" id="simKpis"></div>
+          <h3>Range of outcomes: growth of 1</h3><div id="simLegend" class="legend"></div><div id="simFan" class="chart"></div>
+          <h3>Distribution of annualised returns</h3><div id="simHist" class="chart"></div>
+          <div class="table-wrap"><table id="simTable" class="data"></table></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="wrap footer">Prototype. Analytics output for review, not investment advice. Uploaded data is held in memory on this server and cleared when it restarts.</footer>
+  <script src="core.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
