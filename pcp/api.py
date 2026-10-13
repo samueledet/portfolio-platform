@@ -15,12 +15,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .engine import data, optimize, performance, risk, stats
+from . import report as report_builder
+from .engine import attribution, currency, data, optimize, performance, risk, spending, stats
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SAMPLES = {
     "etfs": ("course_etfs.csv", "Six ETFs, daily prices 2012-2017"),
     "indices": ("index_returns_monthly.csv", "Six asset-class indices, monthly returns 2000-2017"),
+    "fx": ("uk_equity_fund_gbpusd.csv", "UK equity fund in GBP with the GBP/USD rate, daily (for the currency step)"),
 }
 MAX_UPLOAD = 25 * 1024 * 1024
 
@@ -78,6 +80,12 @@ def window(ds: data.Dataset, start: str | None, end: str | None):
     return ds.returns[mask], ds.dates[mask]
 
 
+def resolve(ds: data.Dataset, body) -> tuple[np.ndarray, Any, dict]:
+    """Returns in the analysis window, their dates, and the resolved assumptions."""
+    r, dates = window(ds, body.start, body.end)
+    return r, dates, stats.resolve_assumptions(r, ds.periods_per_year, body.assumptions, rf=body.rf)
+
+
 def thin(n: int, limit: int = 500) -> np.ndarray:
     """Indices that downsample a long series for charting, always keeping the last point."""
     if n <= limit:
@@ -107,6 +115,7 @@ class OptimiseIn(Base):
     objective: str = "max_sharpe"
     target: float | None = None
     constraints: dict | None = None
+    beta: float = Field(0.95, ge=0.5, lt=1)
 
 
 class FrontierIn(Base):
@@ -143,6 +152,44 @@ class SimulateIn(Base):
 
 class ReportIn(BacktestIn):
     constraints: dict | None = None
+
+
+class AttributionIn(Base):
+    weights: list[float]
+    benchmark_weights: list[float] | None = None
+
+
+class CurrencyIn(Base):
+    asset: int
+    currency: int
+    hedge_ratio: float = Field(0.5, ge=0, le=1.5)
+    base_rate: float = 0.0
+    foreign_rate: float = 0.0
+
+
+class SpendingIn(Base):
+    weights: list[float]
+    years: int = Field(30, ge=1, le=100)
+    trials: int = Field(5000, ge=100, le=50000)
+    seed: int = 42
+    rule: str = "smoothed"
+    rate: float = Field(0.04, ge=0, lt=1)
+    smoothing_years: int = Field(3, ge=1, le=20)
+    hybrid_weight: float = Field(0.7, ge=0, le=1)
+    inflation: float = 0.025
+    inflation_vol: float = Field(0.01, ge=0)
+    contribution: float = Field(0.0, ge=0)
+    fee: float = Field(0.0, ge=0, lt=0.2)
+    compare_rates: list[float] | None = None
+
+
+class ReportDocIn(ReportIn):
+    title: str = "Strategic asset allocation review"
+    client: str | None = None
+    focus: str | None = None
+    simulation: dict | None = None
+    spending: dict | None = None
+    stress_windows: list[dict] | None = None
 
 
 # ------------------------------------------------------------------ datasets
@@ -186,7 +233,7 @@ def statistics(dataset_id: str, body: Base):
     ds = get(dataset_id)
     r, dates = window(ds, body.start, body.end)
     spec = body.assumptions or {}
-    a = stats.resolve_assumptions(r, ds.periods_per_year, spec)
+    a = stats.resolve_assumptions(r, ds.periods_per_year, spec, rf=body.rf)
     hist = stats.resolve_assumptions(r, ds.periods_per_year, {"method": spec.get("method", "arithmetic"),
                                                               "covariance": spec.get("covariance")})
     idx = thin(len(r) + 1)
@@ -194,7 +241,7 @@ def statistics(dataset_id: str, body: Base):
     labels = [str(dates[0].date())] + [str(d.date()) for d in dates]
     return clean({
         "assets": stats.asset_statistics(r, ds.periods_per_year, body.rf, spec.get("method", "arithmetic")),
-        "assumptions": {k: a[k] for k in ("mu", "vol", "corr", "cov", "shrinkage")},
+        "assumptions": {k: a.get(k) for k in ("mu", "vol", "corr", "cov", "shrinkage", "notes", "prior_mu")},
         "historical": {k: hist[k] for k in ("mu", "vol", "corr")},
         "growth": {"dates": [labels[i] for i in idx], "values": growth.T},
         "histograms": [stats.histogram(r[:, i]) for i in range(ds.n_assets)],
@@ -205,17 +252,15 @@ def statistics(dataset_id: str, body: Base):
 @app.post("/api/datasets/{dataset_id}/optimise")
 def optimise(dataset_id: str, body: OptimiseIn):
     ds = get(dataset_id)
-    r, _ = window(ds, body.start, body.end)
-    a = stats.resolve_assumptions(r, ds.periods_per_year, body.assumptions)
+    r, _, a = resolve(ds, body)
     return clean(optimize.optimise(a["mu"], a["cov"], body.objective, rf=body.rf, target=body.target,
-                                   constraints=body.constraints))
+                                   constraints=body.constraints, scenarios=r, beta=body.beta))
 
 
 @app.post("/api/datasets/{dataset_id}/frontier")
 def frontier(dataset_id: str, body: FrontierIn):
     ds = get(dataset_id)
-    r, _ = window(ds, body.start, body.end)
-    a = stats.resolve_assumptions(r, ds.periods_per_year, body.assumptions)
+    r, _, a = resolve(ds, body)
     mu, cov = a["mu"], a["cov"]
     front = optimize.efficient_frontier(mu, cov, rf=body.rf, constraints=body.constraints, points=body.points)
     key = {"Minimum variance": front["min_variance"], "Maximum return": front["max_return"]}
@@ -263,7 +308,7 @@ def stress(dataset_id: str, body: StressIn):
     result = {"windows": risk.window_analysis(ds.returns, ds.dates, w, windows, ppy=ppy, rf=body.rf)}
     if body.shock_window:
         r, _ = window(ds, body.start, body.end)
-        base = stats.resolve_assumptions(r, ppy, body.assumptions)["mu"]
+        base = stats.resolve_assumptions(r, ppy, body.assumptions, rf=body.rf)["mu"]
         shock = risk.window_analysis(ds.returns, ds.dates, w, [body.shock_window], ppy=ppy)[0]
         if "error" in shock:
             raise ValueError(shock["error"])
@@ -275,8 +320,7 @@ def stress(dataset_id: str, body: StressIn):
 @app.post("/api/datasets/{dataset_id}/simulate")
 def simulate(dataset_id: str, body: SimulateIn):
     ds = get(dataset_id)
-    r, _ = window(ds, body.start, body.end)
-    a = stats.resolve_assumptions(r, ds.periods_per_year, body.assumptions)
+    r, _, a = resolve(ds, body)
     w = check_weights(body.weights, ds.n_assets)
     return clean(risk.monte_carlo(w, a["mu"], a["cov"], ppy=ds.periods_per_year, years=body.years, trials=body.trials,
                                   method=body.method, seed=body.seed, history=r, df=body.df, rf=body.rf))
@@ -291,7 +335,7 @@ def report(dataset_id: str, body: ReportIn):
     ds = get(dataset_id)
     r, dates = window(ds, body.start, body.end)
     ppy = ds.periods_per_year
-    a = stats.resolve_assumptions(r, ppy, body.assumptions)
+    a = stats.resolve_assumptions(r, ppy, body.assumptions, rf=body.rf)
     wb = Workbook()
     bold = Font(name="Arial", bold=True)
 
@@ -336,6 +380,95 @@ def report(dataset_id: str, body: ReportIn):
     buf.seek(0)
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition": 'attachment; filename="portfolio_analysis.xlsx"'})
+
+RULE_LABELS = {"percent_of_value": "percentage of fund value", "smoothed": "percentage of the smoothed average value",
+               "hybrid": "hybrid (Yale / Stanford)", "fixed_real": "fixed amount in today's money"}
+SOURCE_LABELS = {"historical": "historical estimates from the uploaded data", "custom": "custom forecasts",
+                 "blend": "a weighted blend of forecast sets", "black_litterman": "Black-Litterman equilibrium returns adjusted for views"}
+
+
+@app.post("/api/datasets/{dataset_id}/attribution")
+def attribute(dataset_id: str, body: AttributionIn):
+    ds = get(dataset_id)
+    r, dates, a = resolve(ds, body)
+    w = check_weights(body.weights, ds.n_assets)
+    b = check_weights(body.benchmark_weights, ds.n_assets) if body.benchmark_weights else None
+    out = attribution.attribute(r, w, b)
+    out["risk_contribution"] = optimize.describe(w, a["mu"], a["cov"], body.rf)["risk_contribution"]
+    return clean({**out, "start": str(dates[0].date()), "end": str(dates[-1].date())})
+
+
+@app.post("/api/datasets/{dataset_id}/currency")
+def currency_hedge(dataset_id: str, body: CurrencyIn):
+    ds = get(dataset_id)
+    r, dates = window(ds, body.start, body.end)
+    n = ds.n_assets
+    if not (0 <= body.asset < n and 0 <= body.currency < n) or body.asset == body.currency:
+        raise ValueError("Choose one column for the asset and a different one for the currency.")
+    out = currency.hedge_analysis(r[:, body.asset], r[:, body.currency], ppy=ds.periods_per_year,
+                                  hedge_ratio=body.hedge_ratio, base_rate=body.base_rate, foreign_rate=body.foreign_rate)
+    idx = thin(len(r) + 1)
+    labels = [str(dates[0].date())] + [str(d.date()) for d in dates]
+    out["wealth"] = {k: np.asarray(v)[idx] for k, v in out["wealth"].items()}
+    return clean({**out, "dates": [labels[i] for i in idx], "asset": ds.assets[body.asset], "currency": ds.assets[body.currency]})
+
+
+@app.post("/api/datasets/{dataset_id}/spending")
+def spending_policy(dataset_id: str, body: SpendingIn):
+    ds = get(dataset_id)
+    _, _, a = resolve(ds, body)
+    w = check_weights(body.weights, ds.n_assets)
+    kw = dict(years=body.years, trials=body.trials, seed=body.seed, rule=body.rule, smoothing_years=body.smoothing_years,
+              hybrid_weight=body.hybrid_weight, inflation=body.inflation, inflation_vol=body.inflation_vol,
+              contribution=body.contribution, fee=body.fee)
+    out = spending.simulate(w, a["mu"], a["cov"], rate=body.rate, **kw)
+    out.update({"rule_label": RULE_LABELS[body.rule], "inflation": body.inflation, "contribution": body.contribution, "fee": body.fee})
+    if body.compare_rates:
+        out["comparison"] = spending.compare_rates(w, a["mu"], a["cov"], body.compare_rates[:12], **{**kw, "trials": min(body.trials, 3000)})
+    return clean(out)
+
+
+@app.post("/api/datasets/{dataset_id}/report.docx")
+def report_docx(dataset_id: str, body: ReportDocIn):
+    """Investment-committee report (Word) for the focus portfolio, with the other portfolios for comparison."""
+    ds = get(dataset_id)
+    if not body.portfolios:
+        raise ValueError("Add at least one portfolio before creating the report.")
+    r, dates, a = resolve(ds, body)
+    n, ppy = ds.n_assets, ds.periods_per_year
+    names = [p.name for p in body.portfolios]
+    focus = body.focus if body.focus in names else names[0]
+    fw = check_weights(body.portfolios[names.index(focus)].weights, n)
+    spec = body.assumptions or {}
+    cons = body.constraints or {}
+    sim = body.simulation or {}
+    bench = body.benchmark if body.benchmark in names else None
+    ctx = {
+        "title": body.title, "client": body.client, "focus": focus, "rf": body.rf, "benchmark": bench,
+        "assets": ds.assets, "dataset": summary(dataset_id), "window": (str(dates[0].date()), str(dates[-1].date())),
+        "mu": a["mu"].tolist(), "vol": a["vol"].tolist(), "notes": a["notes"],
+        "assumption_label": SOURCE_LABELS.get(spec.get("source", "historical"), "historical estimates")
+        + (f", returns x {spec['return_multiplier']:g} and risk x {spec.get('vol_multiplier', 1):g}"
+           if spec.get("return_multiplier", 1) != 1 or spec.get("vol_multiplier", 1) != 1 else ""),
+        "constraints": {"lower": cons.get("lower") or [0.0] * n, "upper": cons.get("upper") or [1.0] * n, "groups": cons.get("groups") or []},
+        "portfolios": [{"name": p.name, **{k: v for k, v in optimize.describe(check_weights(p.weights, n), a["mu"], a["cov"], body.rf).items()
+                                              if k != "risk_contribution"}} for p in body.portfolios],
+        "frontier": frontier(dataset_id, FrontierIn(**body.model_dump(include={"assumptions", "rf", "start", "end", "constraints"}))),
+        "backtest": backtest(dataset_id, BacktestIn(**{**body.model_dump(include={"assumptions", "rf", "start", "end", "portfolios", "rebalance", "cost_bps"}), "benchmark": bench})),
+        "rebalance_label": {"every_period": "rebalanced every period", "monthly": "rebalanced monthly", "quarterly": "rebalanced quarterly",
+                            "annual": "rebalanced annually", "never": "never rebalanced (buy and hold)"}.get(body.rebalance, body.rebalance),
+        "cost_bps": body.cost_bps,
+        "stress": risk.window_analysis(ds.returns, ds.dates, fw, body.stress_windows or risk.suggest_windows(ds.dates, ds.returns @ fw, ppy), ppy=ppy, rf=body.rf),
+        "simulation": risk.monte_carlo(fw, a["mu"], a["cov"], ppy=ppy, years=float(sim.get("years", 5)), trials=int(sim.get("trials", 5000)),
+                                       method=sim.get("method", "normal"), seed=int(sim.get("seed", 42)), history=r, rf=body.rf),
+        "attribution": attribution.attribute(r, fw, check_weights(body.portfolios[names.index(bench)].weights, n) if bench and bench != focus else None),
+    }
+    if body.spending:
+        ctx["spending"] = spending_policy(dataset_id, SpendingIn(**{**body.model_dump(include={"assumptions", "rf", "start", "end"}),
+                                                                    **body.spending, "weights": fw.tolist()}))
+    content = report_builder.build(ctx)
+    return StreamingResponse(io.BytesIO(content), media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                             headers={"Content-Disposition": 'attachment; filename="investment_committee_report.docx"'})
 
 
 app.mount("/", StaticFiles(directory=ROOT / "web", html=True), name="web")

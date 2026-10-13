@@ -1,6 +1,6 @@
 # Portfolio Construction Platform (prototype)
 
-A workspace where buy-side investors (sovereign wealth funds, endowments, asset managers) upload their own asset data and run a portfolio-construction study: statistics, optimisation under constraints, backtests, stress tests and Monte Carlo simulation.
+A workspace where buy-side investors (sovereign wealth funds, endowments, asset managers) upload their own asset data and run a portfolio-construction study, from statistics to an investment-committee report.
 
 This is a prototype. It runs on one machine, has no sign-in, and keeps uploaded data in memory until the server stops.
 
@@ -24,18 +24,22 @@ python -m venv --system-site-packages %USERPROFILE%\.venvs\portfolio-platform
 ```
 
 Demo links load a sample and run through to a step, for example
-`http://127.0.0.1:8800/?demo=indices&step=backtest` (`demo` = `etfs` or `indices`; `step` = `data`, `assume`, `optimise`, `backtest`, `stress` or `simulate`).
+`http://127.0.0.1:8800/?demo=indices&step=spending`.
+`demo` is `etfs`, `indices` or `fx`; `step` is `data`, `assume`, `optimise`, `backtest`, `stress`, `simulate`, `spending` or `currency`.
 
 ## What a user can do
 
 | Step | What it does |
 |---|---|
-| 1 Data | Upload CSV or Excel (dates in the first column, one column per asset). Prices or returns and the frequency are detected and can be overridden. Shows growth, statistics, correlation and return distributions. |
-| 2 Assumptions | Use historical estimates or type custom expected returns and risk. Choose the annualisation method, sample or shrinkage covariance, and an optimistic or pessimistic tilt. Set minimum and maximum weights and group limits. |
-| 3 Optimise | Efficient frontier under the constraints, with minimum variance, maximum Sharpe, maximum return, risk parity and equal weight as reference portfolios. Add portfolios for a risk limit or return target, or type custom weights. |
-| 4 Backtest | Apply each portfolio to the actual returns with a chosen rebalancing rule and trading cost. Reports return, risk, Sharpe, Sortino, drawdown, VaR and CVaR, plus tracking error and information ratio against a benchmark. |
+| 1 Data | Upload CSV or Excel (dates in the first column, one column per asset). Prices or returns and the frequency are detected and can be overridden. |
+| 2 Assumptions | Expected returns and risk from history, custom forecasts, a weighted blend of several forecast sets, or Black–Litterman views. Custom correlations, sample or shrinkage covariance, optimistic and pessimistic tilts. Minimum, maximum and group weight limits. |
+| 3 Optimise | Efficient frontier under the constraints, with reference portfolios. Add portfolios for a risk limit, a return target, maximum Sharpe, minimum variance, minimum tail loss (CVaR) or risk parity, or type custom weights. |
+| 4 Backtest | Apply each portfolio to the actual returns with a rebalancing rule and trading cost. Attribution shows each asset's contribution to return and the allocation effect against a benchmark. |
 | 5 Stress test | Portfolio behaviour in the crisis periods the data covers and in its own worst drawdown, plus a severity slider for any window. |
-| 6 Simulate | Monte Carlo projection (normal, fat-tailed or bootstrapped history): range of outcomes, probability of loss, VaR and CVaR, drawdowns. |
+| 6 Simulate | Monte Carlo projection (normal, fat-tailed or bootstrapped history). |
+| 7 Spending policy | Projects fund value and payouts in today's money under a spending rule (percentage of value, smoothed, hybrid, or fixed real amount), with inflation, contributions and costs. Reports the probability of preserving real value and compares spending rates. |
+| 8 Currency | For a foreign-currency holding: local, unhedged and hedged returns at any hedge ratio, and the risk at each ratio. |
+| Committee report | A Word document for one proposed portfolio: summary, assumptions, portfolios, backtest, attribution, stress tests, simulated outlook and spending policy, with charts. |
 | Export Excel | An audit workbook with inputs, assumptions, portfolios and backtest results. |
 
 ## Layout
@@ -43,14 +47,18 @@ Demo links load a sample and run through to a step, for example
 ```
 pcp/engine/       analytics library: pure functions, no web code
   data.py         file loading, type and frequency detection, cleaning
-  stats.py        statistics, covariance, assumption blending and tilts
-  optimize.py     constrained mean-variance optimisation (CVXPY), frontier, risk parity
+  stats.py        statistics, covariance, blending, Black-Litterman, correlation repair
+  optimize.py     constrained optimisation (CVXPY): mean-variance, CVaR, risk parity, frontier
   performance.py  rebalanced portfolio returns and performance metrics
+  attribution.py  return contribution and allocation effect
   risk.py         stress windows, shock sensitivity, Monte Carlo
+  spending.py     spending-policy simulation
+  currency.py     currency hedge analysis
+pcp/report.py     committee report (Word, with matplotlib charts)
 pcp/api.py        FastAPI endpoints over the engine; serves the web app
 web/              interface (plain JavaScript, SVG charts, no build step)
-tests/            reference tests and API tests
-sample_data/      the two demo datasets
+tests/            reference tests, extension tests and API tests
+sample_data/      the three demo datasets
 ```
 
 ## Tests
@@ -64,13 +72,14 @@ python -m pytest tests -q
 - Unit 3: Solver's minimum-risk portfolio and the 14.80% return at 12% volatility
 - Unit 4: the optimistic CMEs, the SAA weights, and the 3, 5 and 10-year backtest tables
 - Unit 5: the SAA weights, the 1.44× oil-shock break-even, and the Monte Carlo scenario inputs
-- Unit 6: return, volatility, downside deviation, Sortino, skewness and kurtosis for SAA and TAA
+- Unit 6: return, volatility, downside deviation, Sortino, skewness and kurtosis for SAA and TAA, and the unhedged return of the UK carve-out
+
+`tests/test_extensions.py` covers the methods the workbooks do not have. Examples: a certain Black–Litterman view is honoured exactly, attribution effects add up to the active return, a zero-volatility spending case matches a hand calculation.
 
 ## Not built yet
 
 - Sign-in, separate storage per client, and a database (data is in memory only)
-- Custom correlation input and blending forecasts from several managers in the interface (the engine supports both)
-- Black–Litterman, CVaR optimisation, performance attribution, currency hedging, spending-policy simulation
-- Word or PDF investment-committee report
+- A React interface: Node.js is installed, but the npm registry is blocked on this network, so the interface stays in plain JavaScript for now
+- Hosting
 
 Analytics output is for review. It is not investment advice.

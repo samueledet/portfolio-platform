@@ -26,3 +26,29 @@ table.inputs input:disabled { color: var(--text-muted); background: var(--surfac
 .x:hover { color: var(--div-neg); }
 .busy { opacity: .55; pointer-events: none; }
 .empty { color: var(--text-muted); font-size: 14px; padding: 18px 0; }
+
+/* assumptions: forecast sets, views, correlation editor */
+.sets { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 4px 0 12px; font-size: 13px; color: var(--text-secondary); }
+.set { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px; }
+.set input[type="text"] { width: 150px; min-height: 30px; padding: 3px 8px; }
+.set input[type="number"] { width: 64px; min-height: 30px; padding: 3px 8px; }
+.view-row select { min-height: 32px; padding: 3px 8px; }
+.view-row input[type="number"] { width: 78px; min-height: 30px; padding: 3px 8px; text-align: right; }
+.view-row label { display: inline-flex; align-items: center; gap: 6px; }
+.check { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text-primary); }
+.check input { width: 16px; height: 16px; min-height: 0; accent-color: var(--accent); }
+table.matrix.inputs input[type="number"] { width: 70px; text-align: center; }
+table.matrix td.muted { color: var(--text-muted); }
+
+/* report dialog */
+.dlg { border: 1px solid var(--border); border-radius: 14px; background: var(--surface-1); color: var(--text-primary); padding: 22px; width: min(480px, calc(100vw - 32px)); }
+.dlg::backdrop { background: rgba(0, 0, 0, .45); }
+.dlg form { display: flex; flex-direction: column; gap: 12px; }
+.dlg label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--text-secondary); }
+.dlg label.check { flex-direction: row; align-items: center; color: var(--text-primary); }
+.dlg input[type="text"], .dlg select { width: 100%; }
+.steps { overflow-x: auto; scrollbar-width: none; }
+.steps::-webkit-scrollbar { display: none; }
+
+/* the hidden attribute must win over component display rules */
+[hidden] { display: none !important; }

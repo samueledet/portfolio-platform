@@ -14,6 +14,7 @@
       <span class="status">Prototype</span>
       <span class="ds-chip" id="dsChip" hidden></span>
       <span style="flex:1"></span>
+      <button id="reportBtn" class="btn" type="button" hidden>Committee report</button>
       <button id="exportBtn" class="btn ghost" type="button" hidden>Export Excel</button>
       <button id="themeToggle" class="btn ghost" type="button" aria-label="Toggle light or dark theme">Theme</button>
     </div>
@@ -24,6 +25,8 @@
       <button type="button" data-step="backtest" disabled>4 Backtest</button>
       <button type="button" data-step="stress" disabled>5 Stress test</button>
       <button type="button" data-step="simulate" disabled>6 Simulate</button>
+      <button type="button" data-step="spending" disabled>7 Spending policy</button>
+      <button type="button" data-step="currency" disabled>8 Currency</button>
     </nav>
   </header>
 
@@ -65,23 +68,32 @@
     <div class="panel" id="p-assume" hidden>
       <section class="card">
         <h2>Capital market assumptions</h2>
-        <p class="sub">Choose where expected returns and risk come from. Historical values are computed from your data. Switch to custom to type your own forecasts. Correlations come from your data.</p>
+        <p class="sub" id="aHelp"></p>
         <div class="controls inner">
-          <label>Source <select id="aSource"><option value="historical">Historical data</option><option value="custom">Custom forecasts</option></select></label>
+          <label>Source <select id="aSource"><option value="historical">Historical data</option><option value="custom">Custom forecasts</option><option value="blend">Blend of forecast sets</option><option value="black_litterman">Black–Litterman views</option></select></label>
           <label>Annualise means <select id="aMethod"><option value="arithmetic">Mean × periods</option><option value="compound">(1 + mean)^periods − 1</option></select></label>
           <label>Covariance <select id="aCov"><option value="sample">Sample</option><option value="shrinkage">Shrinkage (Ledoit–Wolf)</option></select></label>
           <label>Scenario <select id="aScenario"><option value="1,1">Base case</option><option value="1.1,0.9">Optimistic (+10% return, −10% risk)</option><option value="0.9,1.1">Pessimistic (−10% return, +10% risk)</option><option value="custom">Custom tilt</option></select></label>
           <label>Return × <input id="aRetMult" type="number" step="0.05" value="1" min="0"></label>
           <label>Risk × <input id="aVolMult" type="number" step="0.05" value="1" min="0.05"></label>
         </div>
+        <div id="setsBar"></div>
         <div class="table-wrap"><table id="assumeTable" class="data inputs"></table></div>
+        <div id="blBox"></div>
+        <div id="aNotes"></div>
+      </section>
+      <section class="card">
+        <h2>Correlations</h2>
+        <p class="sub">By default correlations come from your data. Tick the box to type your own; edit the cells below the diagonal and the matrix stays symmetric. If the numbers are not mutually consistent, the nearest valid matrix is used and you are told.</p>
+        <label class="check"><input id="aCorrCustom" type="checkbox"> Use custom correlations</label>
+        <div class="table-wrap" style="margin-top:10px"><table id="corrEdit" class="data matrix inputs"></table></div>
       </section>
       <section class="card">
         <h2>Constraints</h2>
-        <p class="sub">Minimum and maximum weight for each asset are set in the table above. Group limits cap or floor the combined weight of several assets, for example all equities.</p>
+        <p class="sub">Minimum and maximum weight for each asset are set in the table at the top. Group limits cap or floor the combined weight of several assets, for example all equities.</p>
         <div id="groups"></div>
         <button id="addGroup" class="btn ghost" type="button">Add a group limit</button>
-        <div class="toolbar" style="margin-top:16px"><button id="aApply" class="btn" type="button">Apply and continue to optimise</button><span class="muted" id="aNote"></span></div>
+        <div class="toolbar" style="margin-top:16px"><button id="aApply" class="btn" type="button">Apply and continue to optimise</button></div>
       </section>
     </div>
 
@@ -96,10 +108,11 @@
       </section>
       <section class="card">
         <h2>Portfolios</h2>
-        <p class="sub">These portfolios carry into the backtest, stress test and simulation steps. Add an optimised portfolio for a specific objective, or type your own weights.</p>
+        <p class="sub">These portfolios carry into every later step. Add an optimised portfolio for a specific objective, or type your own weights.</p>
         <div class="controls inner">
-          <label>Objective <select id="oObjective"><option value="target_volatility">Maximise return at a risk limit</option><option value="target_return">Minimise risk for a target return</option><option value="max_sharpe">Maximum Sharpe ratio</option><option value="min_variance">Minimum variance</option><option value="max_return">Maximum return</option><option value="risk_parity">Risk parity</option></select></label>
-          <label id="oTargetLab">Target (% a year) <input id="oTarget" type="number" step="0.5" value="10"></label>
+          <label>Objective <select id="oObjective"><option value="target_volatility">Maximise return at a risk limit</option><option value="target_return">Minimise risk for a target return</option><option value="max_sharpe">Maximum Sharpe ratio</option><option value="min_variance">Minimum variance</option><option value="min_cvar">Minimum tail loss (CVaR)</option><option value="max_return">Maximum return</option><option value="risk_parity">Risk parity</option></select></label>
+          <label id="oTargetLab"><span id="oTargetText">Risk limit (% a year)</span> <input id="oTarget" type="number" step="0.5" value="10"></label>
+          <label id="oBetaLab" hidden>Tail confidence (%) <input id="oBeta" type="number" step="1" value="95" min="50" max="99"></label>
           <label>Name <input id="oName" type="text" placeholder="e.g. SAA 10% risk" style="width:170px"></label>
           <button id="oAdd" class="btn ghost" type="button">Add optimised portfolio</button>
           <button id="oCustom" class="btn ghost" type="button">Add custom weights</button>
@@ -124,6 +137,22 @@
           <h3>Growth of 1</h3><div id="btLegend" class="legend"></div><div id="btWealth" class="chart"></div>
           <h3>Drawdown</h3><div id="btDd" class="chart"></div>
           <div class="table-wrap"><table id="btTable" class="data"></table></div>
+        </div>
+      </section>
+      <section class="card">
+        <div class="row-between"><h2>Attribution</h2><button id="runAttr" class="btn ghost" type="button">Run attribution</button></div>
+        <p class="sub">Shows how much each asset added to the portfolio's return. With a benchmark it also shows the allocation effect: the return gained or lost by holding more or less of each asset than the benchmark. Both portfolios hold the same assets, so there is no selection effect.</p>
+        <div class="controls inner">
+          <label>Portfolio <select id="tPort"></select></label>
+          <label>Benchmark <select id="tBench"></select></label>
+        </div>
+        <div id="attrOut" hidden>
+          <div class="kpis kpis-inline" id="attrKpis"></div>
+          <div class="two-col">
+            <div><h3>Contribution to return</h3><div id="attrContrib" class="chart"></div></div>
+            <div><h3 id="attrEffectTitle">Allocation effect vs benchmark</h3><div id="attrEffect" class="chart"></div></div>
+          </div>
+          <div class="table-wrap"><table id="attrTable" class="data"></table></div>
         </div>
       </section>
     </div>
@@ -179,10 +208,80 @@
         </div>
       </section>
     </div>
+
+    <!-- 7 SPENDING -->
+    <div class="panel" id="p-spending" hidden>
+      <section class="card">
+        <div class="row-between"><h2>Spending policy</h2><button id="runSpend" class="btn" type="button">Run projection</button></div>
+        <p class="sub">Projects a fund that earns the portfolio's return, pays out under a spending rule and receives contributions. All values are in today's money and start at 100. The key question is how likely the fund is to keep its inflation-adjusted value.</p>
+        <div class="controls inner">
+          <label>Portfolio <select id="pPort"></select></label>
+          <label>Spending rule <select id="pRule"><option value="smoothed">% of smoothed average value</option><option value="percent_of_value">% of current value</option><option value="hybrid">Hybrid (Yale / Stanford)</option><option value="fixed_real">Fixed amount in today's money</option></select></label>
+          <label>Spending rate (%) <input id="pRate" type="number" step="0.25" value="4" min="0"></label>
+          <label id="pSmoothLab">Smoothing (years) <input id="pSmooth" type="number" step="1" value="3" min="1" max="20"></label>
+          <label id="pHybridLab" hidden>Weight on last year's spending (%) <input id="pHybrid" type="number" step="5" value="70" min="0" max="100"></label>
+          <label>Inflation (%) <input id="pInfl" type="number" step="0.25" value="2.5"></label>
+          <label>Inflation volatility (%) <input id="pInflVol" type="number" step="0.25" value="1" min="0"></label>
+          <label>Contributions (% of start, a year) <input id="pContrib" type="number" step="0.25" value="0" min="0"></label>
+          <label>Costs (% a year) <input id="pFee" type="number" step="0.05" value="0" min="0"></label>
+          <label>Horizon (years) <input id="pYears" type="number" step="5" value="30" min="1" max="100"></label>
+          <label>Trials <select id="pTrials"><option>1000</option><option selected>5000</option><option>20000</option></select></label>
+        </div>
+        <div id="spendOut" hidden>
+          <div class="kpis kpis-inline" id="spendKpis"></div>
+          <div class="two-col">
+            <div><h3>Fund value in today's money</h3><div id="spendValLegend" class="legend"></div><div id="spendVal" class="chart"></div></div>
+            <div><h3>Annual spending in today's money</h3><div id="spendPay" class="chart"></div></div>
+          </div>
+          <h3>How the spending rate changes the outcome</h3>
+          <div id="spendCmpLegend" class="legend"></div><div id="spendCmp" class="chart"></div>
+          <div class="table-wrap"><table id="spendTable" class="data"></table></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 8 CURRENCY -->
+    <div class="panel" id="p-currency" hidden>
+      <section class="card">
+        <div class="row-between"><h2>Currency hedge</h2><button id="runFx" class="btn" type="button">Run analysis</button></div>
+        <p class="sub">For a holding priced in a foreign currency. Pick the column that holds the asset in its own currency and the column that holds the exchange rate (the value of the foreign currency in your base currency). The hedge sells the foreign currency forward on a share of the position.</p>
+        <div class="controls inner">
+          <label>Asset (local currency) <select id="fAsset"></select></label>
+          <label>Exchange rate <select id="fCcy"></select></label>
+          <label>Base-currency interest rate (%) <input id="fBase" type="number" step="0.05" value="0"></label>
+          <label>Foreign interest rate (%) <input id="fForeign" type="number" step="0.05" value="0"></label>
+          <label for="fHedge">Hedge ratio <input id="fHedge" type="range" min="0" max="100" step="5" value="50"> <span class="readout" id="fHedgeOut">50%</span></label>
+        </div>
+        <div id="fxOut" hidden>
+          <div class="kpis kpis-inline" id="fxKpis"></div>
+          <h3>Value of the holding (start = 1)</h3><div id="fxLegend" class="legend"></div><div id="fxWealth" class="chart"></div>
+          <div class="two-col">
+            <div><h3>Risk at each hedge ratio</h3><div id="fxCurve" class="chart"></div></div>
+            <div><h3>Summary</h3><div class="table-wrap"><table id="fxTable" class="data"></table></div></div>
+          </div>
+        </div>
+      </section>
+    </div>
   </main>
+
+  <dialog id="reportDlg" class="dlg">
+    <form method="dialog" id="reportForm">
+      <h2>Investment committee report</h2>
+      <p class="sub">A Word document with the summary, assumptions, portfolios, backtest, attribution, stress tests and simulated outlook for one proposed portfolio.</p>
+      <label>Report title <input id="rTitle" type="text" value="Strategic asset allocation review"></label>
+      <label>Client or fund name (optional) <input id="rClient" type="text"></label>
+      <label>Proposed portfolio <select id="rFocus"></select></label>
+      <label>Benchmark <select id="rBench"></select></label>
+      <label class="check"><input id="rSpend" type="checkbox" checked> Include the spending-policy section (uses the settings in step 7)</label>
+      <div class="toolbar" style="margin-top:14px;justify-content:flex-end">
+        <button class="btn ghost" type="submit" value="cancel">Cancel</button>
+        <button class="btn" type="submit" value="ok" id="rGo">Create report</button>
+      </div>
+    </form>
+  </dialog>
 
   <footer class="wrap footer">Prototype. Analytics output for review, not investment advice. Uploaded data is held in memory on this server and cleared when it restarts.</footer>
   <script src="core.js"></script>
-  <script src="app.js"></script>
+  <script src="workspace.js"></script>
 </body>
 </html>

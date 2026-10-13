@@ -4,7 +4,7 @@ from __future__ import annotations
 import cvxpy as cp
 import numpy as np
 
-OBJECTIVES = ("min_variance", "max_return", "max_sharpe", "target_volatility", "target_return", "risk_parity")
+OBJECTIVES = ("min_variance", "max_return", "max_sharpe", "target_volatility", "target_return", "risk_parity", "min_cvar")
 
 
 class Infeasible(ValueError):
@@ -62,12 +62,21 @@ def describe(w: np.ndarray, mu: np.ndarray, cov: np.ndarray, rf: float = 0.0) ->
             "sharpe": (ret - rf) / vol if vol > 0 else None, "risk_contribution": risk_share}
 
 
+def cvar(losses: np.ndarray, beta: float = 0.95) -> float:
+    """Average of the worst (1 - beta) share of losses."""
+    var = np.quantile(losses, beta)
+    tail = losses[losses >= var]
+    return float(tail.mean()) if tail.size else float(var)
+
+
 def optimise(mu, cov, objective: str = "max_sharpe", *, rf: float = 0.0, target: float | None = None,
-             constraints: dict | None = None) -> dict:
+             constraints: dict | None = None, scenarios: np.ndarray | None = None, beta: float = 0.95) -> dict:
     """Return the optimal portfolio for one objective.
 
     target_volatility maximises return subject to volatility <= target (the convex form of Solver's
     "maximise return at a target risk"); target_return minimises risk subject to return >= target.
+    min_cvar minimises the expected loss in the worst (1 - beta) of periods across `scenarios`
+    (T x N period returns, usually the uploaded history); `target` then sets a minimum expected return.
     """
     mu, cov = np.asarray(mu, dtype=float), np.asarray(cov, dtype=float)
     n = len(mu)
@@ -93,6 +102,19 @@ def optimise(mu, cov, objective: str = "max_sharpe", *, rf: float = 0.0, target:
             raise ValueError("Give a target return.")
         _solve(cp.Problem(cp.Minimize(cp.quad_form(w, S)), cons + [mu @ w >= target]),
                f"a target return of {target:.2%}")
+    elif objective == "min_cvar":
+        if scenarios is None or len(scenarios) < 20:
+            raise ValueError("CVaR optimisation needs at least 20 periods of return history.")
+        if not 0.5 <= beta < 1:
+            raise ValueError("The CVaR confidence level must be between 50% and 100%.")
+        R = np.asarray(scenarios, dtype=float)
+        a, u = cp.Variable(), cp.Variable(len(R), nonneg=True)
+        extra = [u >= -R @ w - a] + ([mu @ w >= target] if target is not None else [])
+        _solve(cp.Problem(cp.Minimize(a + cp.sum(u) / ((1 - beta) * len(R))), cons + extra),
+               "minimum CVaR" + (f" with a return of at least {target:.2%}" if target is not None else ""))
+        out = describe(np.asarray(w.value), mu, cov, rf)
+        return {**out, "objective": objective, "beta": beta,
+                "period_cvar": cvar(-(R @ np.asarray(out["weights"])), beta)}
     elif objective == "max_sharpe":
         excess = mu - rf
         if excess.max() <= 0:
