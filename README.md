@@ -87,3 +87,32 @@ python -m pytest tests -q
 - Hosting
 
 Analytics output is for review. It is not investment advice.
+
+## DC plan data feed
+
+`tools/update_dc_data.py` downloads daily total-return series for the 12 DC-plan asset classes defined in `config/dc_plan.json` and writes `data/dc_plan/dc_plan_daily.csv` (plus `dc_plan_meta.json` and `update.log`). The platform lists it first among the samples as "My DC plan".
+
+| Asset class | Proxy | Source |
+|---|---|---|
+| Real 3% | US CPI-U + 3% a year, accrued daily | BLS |
+| EAFE | EFA | Yahoo Finance (dividends reinvested) |
+| EURO LIBOR | Euro overnight cash (EONIA, then €STR), converted to USD | ECB |
+| EMBI | EMB | Yahoo Finance |
+| EMI | EEM (emerging-market equities) | Yahoo Finance |
+| US ESG EQ | ESGU, with SUSA before Dec 2016 | Yahoo Finance |
+| US ESG FI | EAGG, with AGG before Oct 2018 | Yahoo Finance |
+| G/C Bond | GVI (intermediate government/credit) | Yahoo Finance |
+| R2000 | IWM | Yahoo Finance |
+| S&P 500 | SPY | Yahoo Finance |
+| US 3M TB | 13-week T-bill rate (^IRX), accrued daily | Yahoo Finance |
+| US TIPS | TIP | Yahoo Finance |
+
+Change a proxy by editing the config; no code changes are needed. Each run rebuilds the full history from 2008, checks the result, and keeps the previous file as `dc_plan_daily.prev.csv`. If a download fails, the old file stays in place and the failure is logged.
+
+**Weekly schedule.** Windows Task Scheduler runs the update every Saturday at 08:00, under the task name "PortfolioPlatform DC data update". If the computer was off, it runs at the next opportunity. The task uses `C:\ProgramData\anaconda3\pythonw.exe` because this machine's application-control policy blocks the virtual-environment launcher in scheduled tasks. To run an update by hand:
+
+```bash
+python tools/update_dc_data.py
+```
+
+Proxies are ETFs and public rates, not the plan's own funds or the licensed indices, so returns differ by fees and tracking error. Yahoo Finance data is free but unofficial and may change without notice.

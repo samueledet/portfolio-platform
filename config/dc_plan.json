@@ -1,0 +1,29 @@
+{
+  "name": "DC pension plan",
+  "start": "2008-01-02",
+  "calendar": "SPY",
+  "base_currency": "USD",
+  "output": "data/dc_plan/dc_plan_daily.csv",
+  "assets": [
+    {"name": "Real 3%", "source": "cpi_plus", "series": "CUUR0000SA0", "real_return": 0.03,
+     "proxy": "US CPI-U (BLS, not seasonally adjusted) + 3% a year",
+     "note": "Assumes the option targets inflation plus 3% a year. Months not yet published reuse the latest monthly inflation."},
+    {"name": "EAFE", "source": "yahoo", "ticker": "EFA", "proxy": "iShares MSCI EAFE ETF (EFA)"},
+    {"name": "EURO LIBOR", "source": "eur_cash", "currency": "USD",
+     "proxy": "Euro overnight cash: EONIA to Sep 2019, then the euro short-term rate (ECB), converted to USD at the ECB rate",
+     "note": "EUR LIBOR was discontinued in 2021. Set \"currency\" to \"EUR\" for the return in euros (equivalent to holding it hedged)."},
+    {"name": "EMBI", "source": "yahoo", "ticker": "EMB", "proxy": "iShares J.P. Morgan USD Emerging Markets Bond ETF (EMB)"},
+    {"name": "EMI", "source": "yahoo", "ticker": "EEM", "proxy": "iShares MSCI Emerging Markets ETF (EEM)",
+     "note": "Assumes EMI is emerging-market equities."},
+    {"name": "US ESG EQ", "source": "yahoo", "ticker": "ESGU", "splice": "SUSA",
+     "proxy": "iShares ESG Aware MSCI USA ETF (ESGU); iShares MSCI USA ESG Select ETF (SUSA) before Dec 2016"},
+    {"name": "US ESG FI", "source": "yahoo", "ticker": "EAGG", "splice": "AGG",
+     "proxy": "iShares ESG Aware US Aggregate Bond ETF (EAGG); iShares Core US Aggregate Bond ETF (AGG) before Oct 2018"},
+    {"name": "G/C Bond", "source": "yahoo", "ticker": "GVI", "proxy": "iShares Intermediate Government/Credit Bond ETF (GVI)",
+     "note": "Intermediate maturities; a full-maturity government/credit index is more rate-sensitive."},
+    {"name": "R2000", "source": "yahoo", "ticker": "IWM", "proxy": "iShares Russell 2000 ETF (IWM)"},
+    {"name": "S&P 500", "source": "yahoo", "ticker": "SPY", "proxy": "SPDR S&P 500 ETF (SPY)"},
+    {"name": "US 3M TB", "source": "cash_yield", "ticker": "^IRX", "proxy": "13-week US Treasury bill rate (^IRX), accrued daily"},
+    {"name": "US TIPS", "source": "yahoo", "ticker": "TIP", "proxy": "iShares TIPS Bond ETF (TIP)"}
+  ]
+}

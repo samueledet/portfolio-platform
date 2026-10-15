@@ -5,6 +5,7 @@ Prototype storage: uploaded datasets are kept in memory for the life of the serv
 from __future__ import annotations
 
 import io
+import json
 import pathlib
 import uuid
 from typing import Any
@@ -228,13 +229,30 @@ def health():
     return {"status": "ok", "datasets": len(STORE), "version": app.version}
 
 
+DC_FILE, DC_META = ROOT / "data" / "dc_plan" / "dc_plan_daily.csv", ROOT / "data" / "dc_plan" / "dc_plan_meta.json"
+
+
 @app.get("/api/samples")
 def samples():
-    return [{"key": k, "description": d} for k, (_, d) in SAMPLES.items()]
+    out = []
+    if DC_FILE.exists():                      # the weekly-updated DC plan file, when it has been built
+        meta = json.loads(DC_META.read_text(encoding="utf-8")) if DC_META.exists() else {}
+        out.append({"key": "dc_plan", "description": f"My DC plan: {len(meta.get('assets', []))} asset classes, daily to {meta.get('end', '?')}"})
+    return out + [{"key": k, "description": d} for k, (_, d) in SAMPLES.items()]
+
+
+@app.get("/api/dc-plan")
+def dc_plan_status():
+    """When the DC plan data was last refreshed, and any warnings from that update."""
+    if not DC_META.exists():
+        raise HTTPException(404, "The DC plan data has not been downloaded yet. Run tools/update_dc_data.py.")
+    return json.loads(DC_META.read_text(encoding="utf-8"))
 
 
 @app.post("/api/datasets/sample/{key}")
 def load_sample(key: str):
+    if key == "dc_plan" and DC_FILE.exists():
+        return register(DC_FILE.read_bytes(), DC_FILE.name)
     if key not in SAMPLES:
         raise HTTPException(404, "Unknown sample.")
     name = SAMPLES[key][0]
