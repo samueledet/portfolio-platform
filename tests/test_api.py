@@ -47,7 +47,7 @@ def test_optimise_frontier_and_infeasible_message(ds):
     vols = [q["volatility"] for q in f["points"]]
     assert vols == sorted(vols)
     bad = client.post(f"/api/datasets/{ds['id']}/optimise", json={"objective": "min_variance", "constraints": {"lower": [0.3] * 6}})
-    assert bad.status_code == 422 and "more than 100%" in bad.json()["detail"]
+    assert bad.status_code == 422 and "more than the 100%" in bad.json()["detail"]
 
 
 def test_backtest_stress_simulate_and_report(ds):

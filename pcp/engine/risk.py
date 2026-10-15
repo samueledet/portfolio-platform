@@ -36,8 +36,11 @@ def suggest_windows(dates: pd.DatetimeIndex, portfolio: np.ndarray, ppy: int) ->
 
 
 def window_analysis(returns: np.ndarray, dates: pd.DatetimeIndex, weights, windows: list[dict], *,
-                    ppy: int, rf: float = 0.0) -> list[dict]:
-    """Asset and portfolio behaviour inside each window (period-rebalanced to the given weights)."""
+                    ppy: int, rf: float = 0.0, extra_return: float = 0.0) -> list[dict]:
+    """Asset and portfolio behaviour inside each window (period-rebalanced to the given weights).
+
+    extra_return: annual return of the cash line net of borrowing and short costs (from the mandate).
+    """
     w = np.asarray(weights, dtype=float)
     out = []
     for win in windows:
@@ -46,7 +49,7 @@ def window_analysis(returns: np.ndarray, dates: pd.DatetimeIndex, weights, windo
         if len(r) < 2:
             out.append({**win, "periods": int(len(r)), "error": "Fewer than two observations in this window."})
             continue
-        port = r @ w
+        port = r @ w + extra_return / ppy
         wealth, dd = wealth_and_drawdown(port)
         mean_ann, vol = float(port.mean() * ppy), float(port.std(ddof=1) * np.sqrt(ppy))
         out.append({
@@ -78,7 +81,7 @@ def shock_sensitivity(weights, base_mu, shock_mu, severities=None) -> dict:
 
 def monte_carlo(weights, mu, cov, *, ppy: int, years: float = 5.0, trials: int = 5000, method: str = "normal",
                 seed: int = 42, history: np.ndarray | None = None, df: int = 5, rf: float = 0.0,
-                block: int | None = None) -> dict:
+                block: int | None = None, extra_return: float = 0.0) -> dict:
     """Simulate a period-rebalanced portfolio from annual mu / cov (or by resampling history).
 
     method: "normal" (multivariate normal), "student_t" (fat tails, same covariance), "bootstrap"
@@ -110,7 +113,8 @@ def monte_carlo(weights, mu, cov, *, ppy: int, years: float = 5.0, trials: int =
             raise ValueError("method must be normal, student_t or bootstrap.")
         port = (mu_p + z @ root.T) @ w
 
-    wealth = np.cumprod(1 + port, axis=1)
+    port = port + extra_return / ppy                          # cash, borrowing and short costs (mandate)
+    wealth = np.cumprod(1 + np.maximum(port, -1.0), axis=1)
     terminal = wealth[:, -1]
     ann = np.where(terminal > 0, np.abs(terminal) ** (1 / years), 0.0) - 1
     running_peak = np.maximum.accumulate(np.concatenate([np.ones((trials, 1)), wealth], axis=1), axis=1)

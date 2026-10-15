@@ -3,8 +3,19 @@
 
 const freshAssume = () => ({ source: 'historical', method: 'arithmetic', covariance: 'sample', return_multiplier: 1, vol_multiplier: 1,
   mu: null, vol: null, corrCustom: false, corr: null, sets: [], bl: { market: null, risk_aversion: 2.5, tau: 0.05, views: [] } });
+const freshMandate = () => ({ kind: 'long_only', inv_min: 0, inv_max: 1, net: 1, gross: 1.6, short_cost: 0.005, leverage: 1.5, spread: 0.01,
+  bench: 'equal', benchCustom: null, benchW: null, active: null, budget: 0.03, liability: 0, funding: 1, current: '', curW: null, turnover: 0.2 });
+const MANDATE_HELP = {
+  long_only: 'Weights are positive and add up to 100%. This is the classic institutional allocation.',
+  long_cash: 'Weights are positive; whatever is not invested sits in cash earning the risk-free rate.',
+  long_short: 'Short positions are allowed. Net exposure stays fixed (100% for a 130/30 fund) and gross exposure (longs plus shorts) is capped. Shorts pay a borrow fee. Set a negative minimum weight for any asset that may be shorted.',
+  market_neutral: 'Longs and shorts offset, so net exposure is 0% and the capital sits in cash earning the risk-free rate. Return comes from the spread between longs and shorts.',
+  leveraged: 'Invests more than 100% by borrowing at the risk-free rate plus a spread. Used for levered risk-parity and return-seeking mandates.',
+  benchmark_relative: 'Risk is tracking error against the benchmark and return is active return over it. The usual mandate for an external manager with a tracking-error budget.',
+  surplus: 'Risk and return are measured against the liabilities (assets minus liabilities). Pick the column that best tracks the liabilities, such as a long-bond index, and the funding ratio. The usual mandate for a pension fund or insurer.',
+};
 const S = {
-  ds: null, step: 'data', rf: 0, start: null, end: null, assume: freshAssume(), cons: { lower: [], upper: [], groups: [] },
+  ds: null, step: 'data', rf: 0, start: null, end: null, assume: freshAssume(), mandate: freshMandate(), cons: { lower: [], upper: [], groups: [] },
   stats: null, frontier: null, portfolios: [], bt: null, attr: null, stress: null, sens: null, mc: null, spend: null, fx: null,
 };
 const STEPS = ['data', 'assume', 'optimise', 'backtest', 'stress', 'simulate', 'spending', 'currency'];
@@ -35,7 +46,26 @@ async function download(path, body, filename) {
   const url = URL.createObjectURL(await res.blob()), a = Object.assign(document.createElement('a'), { href: url, download: filename });
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
-const common = () => ({ assumptions: assumeSpec(), rf: S.rf, start: S.start, end: S.end });
+const common = () => ({ assumptions: assumeSpec(), mandate: mandateSpec(), rf: S.rf, start: S.start, end: S.end });
+const SHORTING = ['long_short', 'market_neutral'];
+const fullInv = () => ['long_only', 'benchmark_relative', 'surplus'].includes(S.mandate.kind) || (S.mandate.kind === 'long_short' && S.mandate.net === 1);
+function mandateInfo() {
+  const M = S.mandate, n = S.ds.assets.length;
+  const ref = M.kind === 'benchmark_relative' ? (M.benchW || new Array(n).fill(1 / n)) : M.kind === 'surplus' ? S.ds.assets.map((_, i) => (i === M.liability ? 1 / M.funding : 0)) : null;
+  return { full: fullInv(), ref, relative: M.kind === 'benchmark_relative' ? 'benchmark' : M.kind === 'surplus' ? 'surplus' : null,
+    spread: M.kind === 'leveraged' ? M.spread : 0, shortCost: SHORTING.includes(M.kind) ? M.short_cost : 0 };
+}
+function mandateSpec() {
+  const M = S.mandate, o = { kind: M.kind };
+  if (M.kind === 'long_cash') Object.assign(o, { invested_min: M.inv_min, invested_max: M.inv_max });
+  if (M.kind === 'long_short') Object.assign(o, { net: M.net, gross: M.gross, short_cost: M.short_cost });
+  if (M.kind === 'market_neutral') Object.assign(o, { gross: M.gross, short_cost: M.short_cost });
+  if (M.kind === 'leveraged') Object.assign(o, { leverage: M.leverage, borrow_spread: M.spread });
+  if (M.kind === 'benchmark_relative') Object.assign(o, { benchmark: M.benchW, active_limit: M.active, risk_budget: M.budget });
+  if (M.kind === 'surplus') Object.assign(o, { liability: M.liability, funding_ratio: M.funding, risk_budget: M.budget });
+  if (M.curW) Object.assign(o, { current: M.curW, turnover_max: M.turnover });
+  return o;
+}
 function assumeSpec() {
   const a = S.assume, o = { source: a.source, method: a.method, covariance: a.covariance, return_multiplier: a.return_multiplier, vol_multiplier: a.vol_multiplier };
   const corr = a.corrCustom && a.corr ? a.corr : null;
@@ -49,9 +79,18 @@ function assumeSpec() {
 const consSpec = () => ({ lower: S.cons.lower, upper: S.cons.upper,
   groups: S.cons.groups.filter(g => g.assets.length && (g.min != null || g.max != null)).map(g => ({ name: g.name, assets: g.assets, min: g.min, max: g.max })) });
 const normalise = w => { const s = w.reduce((a, b) => a + b, 0) || 1; return w.map(x => x / s); };
-function describe(w) {           // expected return / risk of a weight vector under the current assumptions
-  const a = S.stats.assumptions, x = normalise(w), ret = dot(x, a.mu), vol = Math.sqrt(Math.max(0, quad(x, a.cov)));
-  return { ret, vol, sharpe: vol > 0 ? (ret - S.rf) / vol : null };
+const shown = w => (fullInv() ? normalise(w) : w).map(v => (Math.abs(v) < 5e-5 ? 0 : v));   // no "-0.0%"
+/* Expected return and risk of a weight vector under the current assumptions and mandate (mirrors the engine). */
+function describe(w) {
+  const a = S.stats.assumptions, I = mandateInfo(), x = I.full ? normalise(w) : [...w];
+  const net = x.reduce((s, v) => s + v, 0), cash = 1 - net, short = x.reduce((s, v) => s + Math.max(-v, 0), 0);
+  const ret = dot(x, a.mu) + cash * (cash >= 0 ? S.rf : S.rf + I.spread) - I.shortCost * short, vol = Math.sqrt(Math.max(0, quad(x, a.cov)));
+  const out = { ret, vol, sharpe: vol > 1e-12 ? (ret - S.rf) / vol : null, net, gross: x.reduce((s, v) => s + Math.abs(v), 0), cash, short, risk: vol, reward: ret };
+  if (I.ref) {
+    const d = x.map((v, i) => v - I.ref[i]), te = Math.sqrt(Math.max(0, quad(d, a.cov))), active = ret - dot(I.ref, a.mu);
+    Object.assign(out, { te, active, ir: te > 1e-12 ? active / te : null, risk: te, reward: active });
+  }
+  return out;
 }
 const plain = ps => ps.map(p => ({ name: p.name, weights: p.weights }));
 
@@ -71,7 +110,7 @@ function invalidate() { Object.assign(S, { frontier: null, bt: null, attr: null,
 // ------------------------------------------------------------------ 1 data
 async function onDataset(ds) {
   const n = ds.assets.length;
-  Object.assign(S, { ds, rf: num('gRf') / 100, start: ds.start, end: ds.end, portfolios: [], stats: null, fx: null, assume: freshAssume() });
+  Object.assign(S, { ds, rf: num('gRf') / 100, start: ds.start, end: ds.end, portfolios: [], stats: null, fx: null, assume: freshAssume(), mandate: freshMandate() });
   S.cons = { lower: new Array(n).fill(0), upper: new Array(n).fill(1), groups: [] };
   invalidate();
   $('gStart').value = ds.start; $('gEnd').value = ds.end;
@@ -83,7 +122,9 @@ async function onDataset(ds) {
   $('aScenario').value = '1,1'; $('aRetMult').value = 1; $('aVolMult').value = 1; $('aCorrCustom').checked = false;
   const opts = ds.assets.map((a, i) => `<option value="${i}">${esc(a)}</option>`).join('');
   $('fAsset').innerHTML = opts; $('fCcy').innerHTML = opts; $('fAsset').value = 0; $('fCcy').value = n - 1;
+  $('mLiab').innerHTML = opts;
   await loadStats();
+  const vols = S.stats.historical.vol; S.mandate.liability = vols.indexOf(Math.min(...vols));   // least volatile column as a first guess
   go('data');
 }
 async function loadStats() { S.stats = await call('statistics', common()); }
@@ -159,6 +200,10 @@ function renderAssume() {
   if (a.source === 'custom') { head.push('Expected return %', 'Risk σ %'); extra.push(i => [cell('in-mu', i, a.mu[i]), cell('in-vol', i, a.vol[i])]); }
   if (a.source === 'blend') a.sets.forEach((s, k) => { head.push(`${esc(s.name)} E(R) %`, `${esc(s.name)} σ %`); extra.push(i => [cell('set-mu', i, s.mu[i], `data-k="${k}"`), cell('set-vol', i, s.vol[i], `data-k="${k}"`)]); });
   if (a.source === 'black_litterman') { head.push('Market weight %', 'Equilibrium E(R)'); extra.push(i => [cell('bl-mkt', i, a.bl.market[i]), used.prior_mu ? pct(used.prior_mu[i]) : '–']); }
+  if (S.mandate.kind === 'benchmark_relative' && S.mandate.bench === 'custom') {
+    const bw = S.mandate.benchCustom || new Array(n).fill(1 / n);
+    head.push('Benchmark %'); extra.push(i => [cell('bm-w', i, bw[i])]);
+  }
   head.push('Min weight %', 'Max weight %', 'Used E(R)', 'Used σ');
   table('assumeTable', head, ds.assets.map((name, i) => [`<b>${esc(name)}</b>`, pct(h.mu[i]), pct(h.vol[i]), ...extra.flatMap(f => f(i)),
     cell('in-lo', i, S.cons.lower[i], 'step="1"'), cell('in-hi', i, S.cons.upper[i], 'step="1"'), `<b>${pct(used.mu[i])}</b>`, pct(used.vol[i])]));
@@ -193,7 +238,34 @@ function renderAssume() {
   const notes = [...(used.notes || [])];
   if (used.shrinkage != null) notes.push(`Covariance shrinkage intensity: ${pct(used.shrinkage, 0)}.`);
   $('aNotes').innerHTML = notes.map(t => `<div class="callout">${esc(t)}</div>`).join('');
+  renderMandate();
   renderGroups();
+}
+function renderMandate() {
+  const M = S.mandate, pct0 = v => +(v * 100).toFixed(2);
+  $('mKind').value = M.kind;
+  document.querySelectorAll('#mandateBox [data-for]').forEach(l => { l.hidden = !l.dataset.for.split(' ').includes(M.kind); });
+  [['mInvMin', M.inv_min], ['mInvMax', M.inv_max], ['mNet', M.net], ['mGross', M.gross], ['mShortCost', M.short_cost], ['mLev', M.leverage],
+    ['mSpread', M.spread], ['mFund', M.funding], ['mTurn', M.turnover]].forEach(([id, v]) => { $(id).value = pct0(v); });
+  $('mActive').value = M.active == null ? '' : pct0(M.active);
+  $('mBudget').value = M.budget == null ? '' : pct0(M.budget);
+  $('mBudgetText').textContent = M.kind === 'surplus' ? 'Surplus-risk budget (%, blank = none)' : 'Tracking-error budget (%, blank = none)';
+  const ports = S.portfolios.map(p => `<option value="p:${esc(p.name)}">${esc(p.name)}</option>`).join('');
+  $('mBench').innerHTML = '<option value="equal">Equal weight</option><option value="custom">Custom (type in the table above)</option>' + ports;
+  $('mBench').value = [...$('mBench').options].some(o => o.value === M.bench) ? M.bench : 'equal';
+  $('mLiab').value = M.liability;
+  $('mCur').innerHTML = '<option value="">No turnover limit</option>' + S.portfolios.map(p => `<option>${esc(p.name)}</option>`).join('');
+  $('mCur').value = S.portfolios.some(p => p.name === M.current) ? M.current : '';
+  $('mHelp').textContent = MANDATE_HELP[M.kind];
+}
+/* Switching mandate: reset per-asset limits to sensible defaults for shorting or long-only. */
+function setMandateKind(kind) {
+  const M = S.mandate, n = S.ds.assets.length;
+  M.kind = kind;
+  M.budget = kind === 'benchmark_relative' ? (M.budget ?? 0.03) : kind === 'surplus' ? null : M.budget;
+  if (kind === 'market_neutral') { M.gross = Math.max(M.gross, 2); S.cons.lower = new Array(n).fill(-0.5); S.cons.upper = new Array(n).fill(0.5); }
+  else if (kind === 'long_short') { if (S.cons.lower.every(v => v >= 0)) S.cons.lower = new Array(n).fill(-0.3); S.cons.upper = S.cons.upper.map(v => Math.max(v, 0.5)); }
+  else { S.cons.lower = S.cons.lower.map(v => Math.max(0, v)); if (S.cons.upper.every(v => v <= 0.5)) S.cons.upper = new Array(n).fill(1); }
 }
 function renderGroups() {
   const ds = S.ds;
@@ -233,6 +305,19 @@ function capture(strict) {
     if (strict && !(v >= -1 && v <= 1)) throw new Error('Correlations must be numbers between −1 and 1.');
     if (Number.isFinite(v)) a.corr[i][j] = a.corr[j][i] = Math.max(-1, Math.min(1, v));
   });
+  const M = S.mandate, pv = (id, d) => { const v = parseFloat($(id).value); if (strict && !Number.isFinite(v) && d === undefined) throw new Error('Every mandate setting needs a number.'); return Number.isFinite(v) ? v / 100 : d; };
+  Object.assign(M, { inv_min: pv('mInvMin', M.inv_min), inv_max: pv('mInvMax', M.inv_max), net: pv('mNet', M.net), gross: pv('mGross', M.gross),
+    short_cost: pv('mShortCost', M.short_cost), leverage: pv('mLev', M.leverage), spread: pv('mSpread', M.spread), funding: pv('mFund', M.funding),
+    turnover: pv('mTurn', M.turnover), active: $('mActive').value === '' ? null : pv('mActive', null), budget: $('mBudget').value === '' ? null : pv('mBudget', null), bench: $('mBench').value || 'equal',
+    liability: +$('mLiab').value || 0, current: $('mCur').value });
+  if (col('bm-w').length === n) M.benchCustom = need(col('bm-w'), 'benchmark weight');
+  if (strict) {                     // freeze the benchmark and the current portfolio so later re-runs do not move them
+    const named = name => S.portfolios.find(p => p.name === name);
+    M.benchW = M.bench === 'custom' ? normalise(M.benchCustom || new Array(n).fill(1 / n)) : M.bench.startsWith('p:') && named(M.bench.slice(2))
+      ? normalise(named(M.bench.slice(2)).weights) : new Array(n).fill(1 / n);
+    if (M.benchW.some(v => v < 0)) throw new Error('Benchmark weights cannot be negative.');
+    M.curW = M.current && named(M.current) ? shown(named(M.current).weights) : null;
+  }
   a.method = $('aMethod').value; a.covariance = $('aCov').value;
   const sc = $('aScenario').value;
   [a.return_multiplier, a.vol_multiplier] = sc === 'custom' ? [num('aRetMult', 1), num('aVolMult', 1)] : sc.split(',').map(Number);
@@ -267,58 +352,82 @@ async function runFrontier() {
 }
 function drawOptimise() {
   refreshSelectors();
+  objectiveChanged();
   const c = $('frontChart');
   if (!S.frontier) { c.innerHTML = '<p class="empty">Press “Run optimiser” to compute the frontier under the current assumptions and constraints.</p>'; $('frontLegend').innerHTML = ''; $('frontNotes').innerHTML = ''; renderPortfolios(); return; }
   const F = S.frontier, ds = S.ds, narrow = c.clientWidth < 560;
   const f = frame(c, narrow ? 340 : 440, { l: 56, r: 28, t: 16, b: 46 });
   const P = S.portfolios.map(p => ({ ...p, ...describe(p.weights) }));
-  const xMax = Math.max(...F.assets.map(a => a.volatility), ...P.map(p => p.vol)) * 1.1;
-  const ys0 = [...F.assets.map(a => a.exp_return), ...P.map(p => p.ret)], yMax = Math.max(...ys0, 0) * 1.12 || 0.01, yMin = Math.min(0, ...ys0) * 1.1;
+  const xMax = Math.max(...F.points.map(p => p.risk), ...F.assets.map(a => a.risk), ...P.map(p => p.risk), 0.01) * 1.1;
+  const ys0 = [...F.points.map(p => p.reward), ...F.assets.map(a => a.reward), ...P.map(p => p.reward)];
+  const yMax = Math.max(...ys0, 0) * 1.12 || 0.01, yMin = Math.min(0, ...ys0) * 1.12;
   const xs = lin(0, xMax, f.x0, f.x1), ys = lin(yMin, yMax, f.y0, f.y1);
   yAxis(f, ys, ticks(yMin, yMax, 5), t => pct(t, 0)); baseline(f, f.y0);
   ticks(0, xMax, narrow ? 4 : 7).forEach(t => el('text', { x: xs(t), y: f.y0 + 18, 'text-anchor': 'middle', style: TXT(), text: pct(t, 0) }, f.svg));
-  axisLabels(f, 'Risk: annualised volatility (σ)', 'Expected annual return');
-  const d = F.points.map((p, i) => `${i ? 'L' : 'M'}${xs(p.volatility).toFixed(1)} ${ys(p.exp_return).toFixed(1)}`).join('');
+  axisLabels(f, F.axes.x, F.axes.y);
+  const d = F.points.map((p, i) => `${i ? 'L' : 'M'}${xs(p.risk).toFixed(1)} ${ys(p.reward).toFixed(1)}`).join('');
   el('path', { d, style: 'fill:none;stroke:var(--accent);stroke-width:3;stroke-linejoin:round' }, f.svg);
   const hit = el('path', { d, style: 'fill:none;stroke:transparent;stroke-width:16' }, f.svg);
-  const weightsTip = w => normalise(w).map((x, i) => (x > 0.0005 ? trow(esc(ds.assets[i]), pct(x, 1), SERIES[i]) : '')).join('');
+  const weightsTip = w => shown(w).map((x, i) => (Math.abs(x) > 0.0005 ? trow(esc(ds.assets[i]), pct(x, 1), SERIES[i]) : '')).join('');
+  const rel = F.mandate.relative, relRows = q => (rel ? trow(rel === 'benchmark' ? 'Active return' : 'Surplus return', pct(q.reward)) + trow(rel === 'benchmark' ? 'Tracking error' : 'Surplus risk', pct(q.risk)) : '');
+  const expo = q => (F.mandate.full_investment && q.gross <= 1.0005 ? '' : trow('Net / gross', `${pct(q.net, 0)} / ${pct(q.gross, 0)}`) + trow('Cash', pct(q.cash, 0)));
   hit.addEventListener('mousemove', ev => {
-    const [mx] = svgPoint(f, ev), p = F.points.reduce((a, b) => (Math.abs(xs(b.volatility) - mx) < Math.abs(xs(a.volatility) - mx) ? b : a));
-    showTip('<div class="t">Efficient portfolio</div>' + trow('Expected return', pct(p.exp_return)) + trow('Risk σ', pct(p.volatility)) + trow('Sharpe', fmt(p.sharpe)) + HR + weightsTip(p.weights), ev.clientX, ev.clientY);
+    const [mx] = svgPoint(f, ev), p = F.points.reduce((a, b) => (Math.abs(xs(b.risk) - mx) < Math.abs(xs(a.risk) - mx) ? b : a));
+    showTip('<div class="t">Efficient portfolio</div>' + trow('Expected return', pct(p.exp_return)) + trow('Volatility σ', pct(p.volatility)) + relRows(p) + expo(p) + HR + weightsTip(p.weights), ev.clientX, ev.clientY);
   });
   hit.addEventListener('mouseleave', hideTip);
   F.assets.forEach((a, i) => {
-    const x = xs(a.volatility), y = ys(a.exp_return), s = 5;
+    const x = xs(a.risk), y = ys(a.reward), s = 5;
     const dm = el('path', { d: `M${x} ${y - s}L${x + s} ${y}L${x} ${y + s}L${x - s} ${y}Z`, style: 'fill:var(--surface-1);stroke:var(--text-primary);stroke-width:1.75' }, f.svg);
     if (ds.assets.length <= 12) el('text', { x: x + 8, y: y + 4, style: TXT(11.5, 'var(--text-secondary)', 600), text: ds.assets[i] }, f.svg);
-    hoverable(dm, () => `<div class="t">${esc(ds.assets[i])}: 100% in one asset</div>` + trow('Expected return', pct(a.exp_return)) + trow('Risk σ', pct(a.volatility)));
+    hoverable(dm, () => `<div class="t">${esc(ds.assets[i])}: 100% in one asset</div>` + trow('Expected return', pct(a.exp_return)) + trow('Volatility σ', pct(a.volatility)) + relRows(a));
   });
   P.forEach((p, k) => {
-    const m = el('circle', { cx: xs(p.vol), cy: ys(p.ret), r: 7, style: `fill:${SERIES[k]};stroke:var(--surface-1);stroke-width:2` }, f.svg);
-    hoverable(m, () => `<div class="t">${esc(p.name)}</div>` + trow('Expected return', pct(p.ret)) + trow('Risk σ', pct(p.vol)) + trow('Sharpe', fmt(p.sharpe)) + HR + weightsTip(p.weights));
+    const m = el('circle', { cx: xs(p.risk), cy: ys(p.reward), r: 7, style: `fill:${SERIES[k]};stroke:var(--surface-1);stroke-width:2` }, f.svg);
+    hoverable(m, () => `<div class="t">${esc(p.name)}</div>` + trow('Expected return', pct(p.ret)) + trow('Volatility σ', pct(p.vol)) + trow('Sharpe', fmt(p.sharpe)) + relRows(p) + expo(p) + HR + weightsTip(p.weights));
   });
   legend('frontLegend', [['Efficient frontier', 'var(--accent)'], ['Single asset (100%)', '', 'ring'], ...P.map((p, k) => [esc(p.name), SERIES[k], 'dot'])]);
+  $('frontLegend').insertAdjacentHTML('afterbegin', `<span class="item"><b>${esc(F.mandate.label)}</b></span>`);
   $('frontNotes').innerHTML = F.notes.map(n => `<div class="callout">${esc(n)}</div>`).join('');
   renderPortfolios();
 }
 function renderPortfolios() {
   const ds = S.ds, P = S.portfolios;
   if (!P.length) { $('portBars').innerHTML = '<p class="empty">No portfolios yet. Run the optimiser or add one.</p>'; $('portTable').innerHTML = ''; $('portLegend').innerHTML = ''; return; }
-  weightBars($('portBars'), P.map(p => [p.name, normalise(p.weights)]), ds.assets, 'portLegend');
-  table('portTable', ['Portfolio', ...ds.assets.map(esc), 'Sum', 'E(R)', 'Risk σ', 'Sharpe', ''],
+  const I = mandateInfo(), plainLong = I.full && P.every(p => p.weights.every(v => v >= -1e-9));
+  if (plainLong) weightBars($('portBars'), P.map(p => [p.name, normalise(p.weights)]), ds.assets, 'portLegend');
+  else columnChart($('portBars'), { categories: ds.assets, series: P.map((p, k) => ({ name: p.name, values: shown(p.weights), color: SERIES[k] })),
+    yFmt: v => pct(v, 0), valFmt: v => pct(v, 1), legend: 'portLegend', rotate: ds.assets.length > 6, height: 280 });
+  const relHead = I.relative ? (I.relative === 'benchmark' ? ['Active return', 'Tracking error', 'Info ratio'] : ['Surplus return', 'Surplus risk', 'Ratio']) : [];
+  const expoHead = plainLong ? ['Sum'] : ['Net', 'Gross', 'Cash'];
+  table('portTable', ['Portfolio', ...ds.assets.map(esc), ...expoHead, 'E(R)', 'Risk σ', 'Sharpe', ...relHead, ''],
     P.map((p, k) => {
       const d = describe(p.weights), sum = p.weights.reduce((a, b) => a + b, 0);
       const cells = p.editable
         ? p.weights.map((w, i) => `<input type="number" class="w-in" data-k="${k}" data-i="${i}" step="1" value="${(w * 100).toFixed(1)}" style="width:66px;text-align:right;min-height:28px;padding:2px 6px" aria-label="${esc(ds.assets[i])} weight">`)
-        : normalise(p.weights).map(w => pct(w, 1));
+        : shown(p.weights).map(w => `<span class="${w < -1e-9 ? 'neg' : ''}">${pct(w, 1)}</span>`);
       return [p.editable ? `<input type="text" class="p-name" data-k="${k}" value="${esc(p.name)}" style="width:150px;min-height:28px;padding:2px 8px" aria-label="Portfolio name">` : `<b>${esc(p.name)}</b>`,
-        ...cells, Math.abs(sum - 1) > 0.0005 ? `<span class="neg">${pct(sum, 0)}</span>` : '100%', `<b>${pct(d.ret)}</b>`, `<b>${pct(d.vol)}</b>`, fmt(d.sharpe),
+        ...cells, ...(plainLong ? [Math.abs(sum - 1) > 0.0005 && !p.editable ? '100%' : Math.abs(sum - 1) > 0.0005 ? `<span class="neg">${pct(sum, 0)}</span>` : '100%']
+          : [pct(d.net, 0), pct(d.gross, 0), pct(d.cash, 0)]),
+        `<b>${pct(d.ret)}</b>`, `<b>${pct(d.vol)}</b>`, fmt(d.sharpe), ...(I.relative ? [pct(d.active), pct(d.te), fmt(d.ir)] : []),
         `<button type="button" class="x p-del" data-k="${k}" aria-label="Remove ${esc(p.name)}">×</button>`];
     }));
 }
 function uniqueName(base) { let name = base, k = 2; while (S.portfolios.some(p => p.name === name)) name = `${base} (${k++})`; return name; }
-const TARGETS = { target_volatility: 'Risk limit (% a year)', target_return: 'Target return (% a year)', min_cvar: 'Minimum return (% a year, optional)' };
+let TARGETS = { target_volatility: 'Risk limit (% a year)', target_return: 'Target return (% a year)', min_cvar: 'Minimum return (% a year, optional)' };
+function objectiveLabels() {
+  const rel = mandateInfo().relative, risk = rel === 'benchmark' ? 'tracking error' : rel === 'surplus' ? 'surplus risk' : 'risk', ret = rel === 'benchmark' ? 'active return' : rel === 'surplus' ? 'surplus return' : 'return';
+  const text = { target_volatility: `Maximise ${ret} at a ${risk} limit`, target_return: `Minimise ${risk} for a target ${ret}`,
+    max_sharpe: rel === 'benchmark' ? 'Maximum information ratio' : rel === 'surplus' ? 'Best surplus return per unit of risk' : 'Maximum Sharpe ratio',
+    min_variance: rel ? `Minimum ${risk}` : 'Minimum variance', min_cvar: 'Minimum tail loss (CVaR)', max_return: 'Maximum return', risk_parity: 'Risk parity (long-only only)' };
+  [...$('oObjective').options].forEach(o => { o.textContent = text[o.value]; o.disabled = o.value === 'risk_parity' && S.mandate.kind !== 'long_only'; });
+  if ($('oObjective').selectedOptions[0].disabled) $('oObjective').value = 'target_volatility';
+  if (rel && $('oTarget').value === '10') $('oTarget').value = '2';            // tracking-error targets are small
+  if (!rel && $('oTarget').value === '2') $('oTarget').value = '10';
+  TARGETS = { target_volatility: `${risk[0].toUpperCase() + risk.slice(1)} limit (% a year)`, target_return: `Target ${ret} (% a year)`, min_cvar: 'Minimum return (% a year, optional)' };
+}
 function objectiveChanged() {
+  objectiveLabels();
   const o = $('oObjective').value;
   $('oTargetLab').hidden = !(o in TARGETS); $('oTargetText').textContent = TARGETS[o] || '';
   $('oBetaLab').hidden = o !== 'min_cvar';
@@ -328,7 +437,7 @@ async function addOptimised() {
   const obj = $('oObjective').value, t = parseFloat($('oTarget').value), target = obj in TARGETS && Number.isFinite(t) ? t / 100 : null;
   if ((obj === 'target_volatility' || obj === 'target_return') && target == null) throw new Error('Enter a target first.');
   const p = await call('optimise', { ...common(), constraints: consSpec(), objective: obj, target, beta: num('oBeta', 95) / 100 });
-  const label = { target_volatility: `Max return at ${t}% risk`, target_return: `Min risk for ${t}% return`, max_sharpe: 'Maximum Sharpe', min_variance: 'Minimum variance',
+  const label = { target_volatility: `Max return at ${t}% ${mandateInfo().relative ? 'TE' : 'risk'}`, target_return: `Min risk for ${t}% return`, max_sharpe: 'Maximum Sharpe', min_variance: 'Minimum variance',
     max_return: 'Maximum return', risk_parity: 'Risk parity', min_cvar: `Minimum CVaR ${num('oBeta', 95)}%` }[obj];
   S.portfolios.push({ name: uniqueName($('oName').value.trim() || label), weights: p.weights });
   $('oName').value = ''; S.bt = null; drawOptimise();
@@ -373,7 +482,7 @@ async function runAttr() {
   drawBacktest();
 }
 function drawAttr() {
-  const A = S.attr, ds = S.ds, hasB = A.allocation_effect != null;
+  const A = S.attr, ds = { assets: S.attr.labels || S.ds.assets }, hasB = A.allocation_effect != null;
   $('attrKpis').innerHTML = tile('Portfolio return', pct(A.total_return, 1), `${esc(A.portfolio)}, ${A.start} to ${A.end}`) +
     (hasB ? tile('Benchmark return', pct(A.benchmark_return, 1), esc(A.benchmark)) + tile('Active return', signed(A.active_return, 1), 'portfolio minus benchmark') : '') +
     tile('Largest contributor', esc(ds.assets[A.contribution.indexOf(Math.max(...A.contribution))]), signed(Math.max(...A.contribution), 1));
@@ -569,6 +678,8 @@ async function init() {
   const rerender = fn => { capture(false); fn(); renderAssume(); };
   $('aSource').addEventListener('change', () => rerender(() => prepareSource($('aSource').value)));
   $('aCorrCustom').addEventListener('change', () => rerender(() => { S.assume.corrCustom = $('aCorrCustom').checked; if (S.assume.corrCustom && !S.assume.corr) S.assume.corr = S.stats.historical.corr.map(r => [...r]); }));
+  $('mKind').addEventListener('change', () => rerender(() => setMandateKind($('mKind').value)));
+  $('mBench').addEventListener('change', () => rerender(() => {}));
   $('aScenario').addEventListener('change', () => { const v = $('aScenario').value; if (v !== 'custom') [$('aRetMult').value, $('aVolMult').value] = v.split(','); $('aRetMult').disabled = $('aVolMult').disabled = v !== 'custom'; });
   $('p-assume').addEventListener('click', ev => {
     const t = ev.target, h = S.stats.historical, a = S.assume;
@@ -614,6 +725,7 @@ async function init() {
     if (!STEPS.includes(step) || step === 'data') return;
     if (q.get('source')) { prepareSource(q.get('source')); S.assume.corrCustom = q.get('corr') === '1'; if (S.assume.corrCustom) S.assume.corr = S.stats.historical.corr.map(r => [...r]);
       if (q.get('source') === 'black_litterman') S.assume.bl.views.push({ type: 'relative', long: 0, short: 1, value: 0.02, confidence: 0.6 }); await loadStats(); }
+    if (q.get('mandate')) { setMandateKind(q.get('mandate')); if (q.get('mandate') === 'benchmark_relative') { S.mandate.benchW = null; } await loadStats(); }
     go(step);
     if (step === 'assume') return;
     if (step === 'currency') return runFx();

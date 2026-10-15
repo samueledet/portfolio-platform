@@ -160,7 +160,7 @@ def test_constraints_always_hold(etfs, objective):
 
 def test_infeasible_constraints_explain_themselves(etfs):
     a = stats.resolve_assumptions(etfs.returns, 252, None)
-    with pytest.raises(optimize.Infeasible, match="more than 100%"):
+    with pytest.raises(optimize.Infeasible, match="more than the 100%"):
         optimize.optimise(a["mu"], a["cov"], "min_variance", constraints={"lower": [0.2] * 6})
     with pytest.raises(optimize.Infeasible, match="below the minimum"):
         optimize.optimise(a["mu"], a["cov"], "target_volatility", target=0.01)

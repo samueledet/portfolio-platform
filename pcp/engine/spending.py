@@ -13,7 +13,7 @@ RULES = ("percent_of_value", "smoothed", "hybrid", "fixed_real")
 def simulate(weights, mu, cov, *, years: int = 30, trials: int = 5000, seed: int = 42,
              rule: str = "smoothed", rate: float = 0.04, smoothing_years: int = 3, hybrid_weight: float = 0.7,
              inflation: float = 0.025, inflation_vol: float = 0.01, contribution: float = 0.0,
-             fee: float = 0.0, initial: float = 100.0) -> dict:
+             fee: float = 0.0, initial: float = 100.0, extra_return: float = 0.0, normalise: bool = True) -> dict:
     """Annual simulation of fund value and spending.
 
     Rules (S = spending for the year, V = fund value at the previous year end):
@@ -33,8 +33,10 @@ def simulate(weights, mu, cov, *, years: int = 30, trials: int = 5000, seed: int
     if years < 1 or years > 100:
         raise ValueError("The horizon must be between 1 and 100 years.")
     w = np.asarray(weights, dtype=float)
-    w = w / w.sum()
-    m, s = float(w @ np.asarray(mu, dtype=float)), float(np.sqrt(max(w @ np.asarray(cov, dtype=float) @ w, 0.0)))
+    if normalise:
+        w = w / w.sum()
+    m = float(w @ np.asarray(mu, dtype=float)) + extra_return           # extra_return: cash line and costs (mandate)
+    s = float(np.sqrt(max(w @ np.asarray(cov, dtype=float) @ w, 0.0)))
     rng = np.random.default_rng(seed)
     # lognormal annual gross return with arithmetic mean (1 + m) and standard deviation s
     sig2 = np.log(1 + (s / (1 + m)) ** 2)
@@ -64,7 +66,9 @@ def simulate(weights, mu, cov, *, years: int = 30, trials: int = 5000, seed: int
     deflator = np.concatenate([np.ones((trials, 1)), price], axis=1)
     real_value, real_spend = value / deflator, spend / price
     q = [5, 25, 50, 75, 95]
-    change = real_spend[:, 1:] / np.where(real_spend[:, :-1] > 0, real_spend[:, :-1], np.nan) - 1 if years > 1 else np.zeros((trials, 1))
+    prev, cur = real_spend[:, :-1], real_spend[:, 1:]
+    with np.errstate(divide="ignore", invalid="ignore"):          # no spending last year counts as no change
+        change = np.where(prev > 0, cur / np.where(prev > 0, prev, 1.0) - 1, 0.0) if years > 1 else np.zeros((trials, 1))
     terminal = real_value[:, -1]
     return {
         "rule": rule, "rate": rate, "years": years, "trials": trials,
@@ -72,13 +76,13 @@ def simulate(weights, mu, cov, *, years: int = 30, trials: int = 5000, seed: int
         "prob_preserve": float((terminal >= initial).mean()),
         "prob_below_70": float((real_value.min(axis=1) < 0.7 * initial).mean()),
         "prob_depleted": float((value[:, -1] <= 1e-9).mean()),
-        "prob_spending_cut_10": float((np.nanmin(change, axis=1) < -0.10).mean()) if years > 1 else 0.0,
+        "prob_spending_cut_10": float((change.min(axis=1) < -0.10).mean()) if years > 1 else 0.0,
         "median_terminal_real": float(np.median(terminal)),
         "p05_terminal_real": float(np.percentile(terminal, 5)), "p95_terminal_real": float(np.percentile(terminal, 95)),
         "median_spending_real": float(np.median(real_spend.mean(axis=1))),
         "first_year_spending": float(np.median(spend[:, 0])),
         "total_spending_real_median": float(np.median(real_spend.sum(axis=1))),
-        "spending_volatility": float(np.nanmedian(np.nanstd(change, axis=1, ddof=1))) if years > 2 else 0.0,
+        "spending_volatility": float(np.median(change.std(axis=1, ddof=1))) if years > 2 else 0.0,
         "value_fan": {"percentiles": q, "values": np.percentile(real_value, q, axis=0).tolist()},
         "spending_fan": {"percentiles": q, "values": np.percentile(real_spend, q, axis=0).tolist()},
         "initial": initial,

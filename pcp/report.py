@@ -50,16 +50,16 @@ def _pct_axis(ax, which="y", decimals=0):
 def chart_frontier(ctx):
     fig, ax = _figure()
     pts = ctx["frontier"]["points"]
-    ax.plot([p["volatility"] for p in pts], [p["exp_return"] for p in pts], color=PALETTE[0], linewidth=2.2, label="Efficient frontier")
+    ax.plot([p["risk"] for p in pts], [p["reward"] for p in pts], color=PALETTE[0], linewidth=2.2, label="Efficient frontier")
     for i, a in enumerate(ctx["frontier"]["assets"]):
-        ax.scatter(a["volatility"], a["exp_return"], marker="D", s=22, facecolor="white", edgecolor=INK, linewidth=1, zorder=3)
-        ax.annotate(ctx["assets"][i], (a["volatility"], a["exp_return"]), textcoords="offset points", xytext=(5, -3), fontsize=7, color="#52514e")
+        ax.scatter(a["risk"], a["reward"], marker="D", s=22, facecolor="white", edgecolor=INK, linewidth=1, zorder=3)
+        ax.annotate(ctx["assets"][i], (a["risk"], a["reward"]), textcoords="offset points", xytext=(5, -3), fontsize=7, color="#52514e")
     for k, p in enumerate(ctx["portfolios"]):
-        ax.scatter(p["volatility"], p["exp_return"], s=46, color=colour(k), edgecolor="white", linewidth=1, zorder=4, label=p["name"])
+        ax.scatter(p["risk"], p["reward"], s=46, color=colour(k), edgecolor="white", linewidth=1, zorder=4, label=p["name"])
     _pct_axis(ax, "y"), _pct_axis(ax, "x")
     ax.grid(axis="x", color="#e1e0d9", linewidth=0.7)
-    ax.set_xlabel("Risk: annualised volatility", fontsize=8, color="#52514e")
-    ax.set_ylabel("Expected annual return", fontsize=8, color="#52514e")
+    ax.set_xlabel(ctx["axes"]["x"], fontsize=8, color="#52514e")
+    ax.set_ylabel(ctx["axes"]["y"], fontsize=8, color="#52514e")
     ax.legend(fontsize=7, frameon=False, loc="best")
     return _png(fig)
 
@@ -67,6 +67,8 @@ def chart_frontier(ctx):
 def chart_weights(ctx):
     ports = ctx["portfolios"]
     fig, ax = _figure(height=0.55 + 0.42 * len(ports))
+    if any(min(p["weights"]) < -1e-6 or abs(sum(p["weights"]) - 1) > 1e-6 for p in ports):
+        return chart_weight_columns(ctx)
     left = np.zeros(len(ports))
     for i, asset in enumerate(ctx["assets"]):
         vals = np.array([p["weights"][i] for p in ports])
@@ -84,6 +86,21 @@ def chart_weights(ctx):
     for side in ("left", "bottom"):
         ax.spines[side].set_visible(False)
     ax.legend(fontsize=7, frameon=False, ncol=min(4, len(ctx["assets"])), loc="upper center", bbox_to_anchor=(0.5, -0.02))
+    return _png(fig)
+
+
+def chart_weight_columns(ctx):
+    """Grouped weights per asset, for mandates with shorts, cash or leverage (a stacked bar cannot show them)."""
+    ports, assets = ctx["portfolios"], ctx["assets"]
+    fig, ax = _figure(height=3.0)
+    width = 0.8 / len(ports)
+    for k, p in enumerate(ports):
+        ax.bar(np.arange(len(assets)) + (k - (len(ports) - 1) / 2) * width, p["weights"], width * 0.92, color=colour(k), label=p["name"])
+    ax.axhline(0, color="#c3c2b7", linewidth=0.8)
+    ax.set_xticks(range(len(assets)), assets, fontsize=7, color=INK, rotation=0 if len(assets) <= 8 else 45)
+    _pct_axis(ax, "y")
+    ax.set_ylabel("Weight", fontsize=8, color="#52514e")
+    ax.legend(fontsize=7, frameon=False, ncol=min(4, len(ports)), loc="best")
     return _png(fig)
 
 
@@ -184,13 +201,20 @@ def build(ctx: dict) -> bytes:
     # 1 summary
     doc.add_heading("1. Summary for the committee", level=1)
     top = sorted(zip(focus["weights"], assets), reverse=True)[:3]
+    md_ = ctx["mandate"]
     bullets = [
+        f"Mandate: {md_['label']}." + (f" Net exposure {focus['net']:.0%}, gross {focus['gross']:.0%}, cash {focus['cash']:.0%}."
+                                       if not md_["full_investment"] or focus["short"] > 0 else ""),
         f"Proposed allocation: {focus['name']}. Expected return {pct(focus['exp_return'])} a year at {pct(focus['volatility'])} "
         f"volatility (Sharpe ratio {num(focus['sharpe'])} at a {pct(ctx['rf'])} risk-free rate). "
         f"Largest holdings: {', '.join(f'{a} {pct(w, 0)}' for w, a in top if w > 0.005)}.",
         f"History: over {ctx['backtest']['start']} to {ctx['backtest']['end']} it would have returned {pct(fm['ann_return'])} a year "
         f"with {pct(fm['volatility'])} volatility and a worst peak-to-trough fall of {pct(fm['max_drawdown'])}.",
     ]
+    if md_["relative"] and focus.get("tracking_error") is not None:
+        word = "tracking error" if md_["relative"] == "benchmark" else "surplus risk"
+        bullets.append(f"Relative to the {'benchmark' if md_['relative'] == 'benchmark' else 'liabilities'}: expected "
+                       f"{'active' if md_['relative'] == 'benchmark' else 'surplus'} return {pct(focus['active_return'])} with {word} {pct(focus['tracking_error'])}.")
     if ctx.get("benchmark") and fm.get("tracking_error") is not None:
         bullets.append(f"Against {ctx['benchmark']}: {'ahead by' if fm['active_return'] >= 0 else 'behind by'} "
                        f"{pct(abs(fm['active_return']))} a year, tracking error {pct(fm['tracking_error'])}, "
@@ -214,6 +238,20 @@ def build(ctx: dict) -> bytes:
     d = ctx["dataset"]
     _para(doc, f"{d['observations']:,} {d['frequency']} returns for {len(assets)} assets from {ctx['window'][0]} to {ctx['window'][1]}. "
                f"Expected returns and risk: {ctx['assumption_label']}.")
+    terms = [f"Mandate: {md_['label']}", f"net exposure {md_['net_min']:.0%} to {md_['net_max']:.0%}"]
+    if md_["gross_max"] is not None:
+        terms.append(f"gross exposure at most {md_['gross_max']:.0%}")
+    if md_["short_cost"]:
+        terms.append(f"short borrow cost {pct(md_['short_cost'], 2)} a year")
+    if md_["borrow_spread"]:
+        terms.append(f"borrowing at the risk-free rate plus {pct(md_['borrow_spread'], 2)}")
+    if md_["active_limit"] is not None:
+        terms.append(f"active weights within ±{md_['active_limit']:.0%} of the benchmark")
+    if md_["liability"]:
+        terms.append(f"liabilities proxied by {md_['liability']} at a {md_['funding_ratio']:.0%} funding ratio")
+    if md_["turnover_max"] is not None:
+        terms.append(f"turnover at most {md_['turnover_max']:.0%} from the current portfolio")
+    _para(doc, "; ".join(terms) + ".")
     lower, upper = ctx["constraints"]["lower"], ctx["constraints"]["upper"]
     _table(doc, ["Asset", "Expected return", "Volatility", "Min weight", "Max weight"],
            [[assets[i], pct(ctx["mu"][i]), pct(ctx["vol"][i]), pct(lower[i], 0), pct(upper[i], 0)] for i in range(len(assets))])
@@ -228,8 +266,10 @@ def build(ctx: dict) -> bytes:
     doc.add_heading("3. Portfolios considered", level=1)
     doc.add_picture(chart_frontier(ctx), width=Inches(6.2))
     doc.add_picture(chart_weights(ctx), width=Inches(6.2))
-    _table(doc, ["Portfolio"] + assets + ["E(R)", "Risk", "Sharpe"],
-           [[p["name"]] + [pct(w, 0) for w in p["weights"]] + [pct(p["exp_return"]), pct(p["volatility"]), num(p["sharpe"])] for p in ctx["portfolios"]])
+    show_cash = any(abs(p["cash"]) > 1e-6 for p in ctx["portfolios"])
+    _table(doc, ["Portfolio"] + assets + (["Cash"] if show_cash else []) + ["E(R)", "Risk", "Sharpe"],
+           [[p["name"]] + [pct(w, 0) for w in p["weights"]] + ([pct(p["cash"], 0)] if show_cash else [])
+            + [pct(p["exp_return"]), pct(p["volatility"]), num(p["sharpe"])] for p in ctx["portfolios"]])
 
     # 4 backtest
     doc.add_heading("4. Historical performance", level=1)
@@ -247,7 +287,8 @@ def build(ctx: dict) -> bytes:
     if at:
         doc.add_heading("Where the return came from", level=2)
         head = ["Asset", "Weight", "Asset return", "Contribution"]
-        rows = [[assets[i], pct(at["weights"][i], 0), pct(at["asset_return"][i]), pct(at["contribution"][i])] for i in range(len(assets))]
+        names = at.get("labels", assets)
+        rows = [[names[i], pct(at["weights"][i], 0), pct(at["asset_return"][i]), pct(at["contribution"][i])] for i in range(len(names))]
         total = ["Total", "100%", "", pct(at["total_return"])]
         if "allocation_effect" in at:
             head += ["Benchmark weight", "Allocation effect"]

@@ -9,13 +9,20 @@ REBALANCE_EVERY = {"every_period": 1, "monthly": 1 / 12, "quarterly": 1 / 4, "an
 
 
 def portfolio_returns(returns: np.ndarray, weights, *, ppy: int, rebalance: str = "every_period",
-                      cost_bps: float = 0.0) -> tuple[np.ndarray, float]:
+                      cost_bps: float = 0.0, normalise: bool = True, cash_rate: float = 0.0,
+                      borrow_spread: float = 0.0, short_cost: float = 0.0) -> tuple[np.ndarray, float]:
     """Period returns of a portfolio that drifts between rebalances back to target weights.
 
     Returns (series, average annual one-way turnover). cost_bps is charged on traded value at each rebalance.
+    With normalise=False the weights are kept as given: 1 - sum(weights) sits in cash earning cash_rate
+    (borrowed at cash_rate + borrow_spread when negative), and short positions pay short_cost a year.
     """
     target = np.asarray(weights, dtype=float)
-    target = target / target.sum()
+    if normalise:
+        target = target / target.sum()
+    elif abs(target.sum() - 1) > 1e-9 or (target < 0).any():
+        return _levered_returns(returns, target, ppy=ppy, rebalance=rebalance, cost_bps=cost_bps, cash_rate=cash_rate,
+                                borrow_spread=borrow_spread, short_cost=short_cost)
     if rebalance not in REBALANCE_EVERY:
         raise ValueError(f"rebalance must be one of {', '.join(REBALANCE_EVERY)}.")
     span = REBALANCE_EVERY[rebalance]
@@ -36,6 +43,40 @@ def portfolio_returns(returns: np.ndarray, weights, *, ppy: int, rebalance: str 
         gross = float(w @ r)
         out[t] = (1 + gross) * (1 - cost) - 1
         w = w * (1 + r) / (1 + gross)
+    years = len(returns) / ppy
+    return out, turnover / years if years > 0 else 0.0
+
+
+def _step(rebalance: str, ppy: int) -> int | None:
+    if rebalance not in REBALANCE_EVERY:
+        raise ValueError(f"rebalance must be one of {', '.join(REBALANCE_EVERY)}.")
+    span = REBALANCE_EVERY[rebalance]
+    return None if span is None else 1 if rebalance == "every_period" else max(1, int(round(span * ppy)))
+
+
+def _levered_returns(returns, target, *, ppy, rebalance, cost_bps, cash_rate, borrow_spread, short_cost):
+    """Positions tracked in money terms so that cash, borrowing and short positions compound correctly."""
+    step = _step(rebalance, ppy)
+    rf_p = (1 + cash_rate) ** (1 / ppy) - 1
+    borrow_p = (1 + cash_rate + borrow_spread) ** (1 / ppy) - 1
+    short_p = short_cost / ppy
+    pos, cash, nav = target.copy(), 1 - target.sum(), 1.0
+    out, turnover = np.empty(len(returns)), 0.0
+    for t, r in enumerate(returns):
+        if step is not None and t > 0 and t % step == 0:
+            traded = np.abs(target * nav - pos).sum()
+            turnover += traded / 2 / nav
+            pos, cash = target * nav, (1 - target.sum()) * nav - traded * cost_bps / 1e4
+        fee = short_p * np.maximum(-pos, 0).sum()
+        pos = pos * (1 + r)
+        cash = cash * (1 + (rf_p if cash >= 0 else borrow_p)) - fee
+        new = pos.sum() + cash
+        out[t] = new / nav - 1
+        nav = new
+        if nav <= 0:                                           # wiped out: the strategy stops
+            out[t + 1:] = 0.0
+            out[t] = -1.0
+            break
     years = len(returns) / ppy
     return out, turnover / years if years > 0 else 0.0
 

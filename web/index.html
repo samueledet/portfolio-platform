@@ -89,8 +89,40 @@
         <div class="table-wrap" style="margin-top:10px"><table id="corrEdit" class="data matrix inputs"></table></div>
       </section>
       <section class="card">
+        <h2>Mandate</h2>
+        <p class="sub">The mandate sets what the portfolio may hold: how much is invested, whether it can short or borrow, and what its risk is measured against. Every later step follows it.</p>
+        <div class="controls inner" id="mandateBox">
+          <label>Mandate <select id="mKind">
+            <option value="long_only">Long-only, fully invested</option>
+            <option value="long_cash">Long-only, cash allowed</option>
+            <option value="long_short">Long/short (e.g. 130/30)</option>
+            <option value="market_neutral">Market neutral</option>
+            <option value="leveraged">Leveraged long-only</option>
+            <option value="benchmark_relative">Benchmark-relative (tracking-error budget)</option>
+            <option value="surplus">Surplus / liability-driven</option>
+          </select></label>
+          <label data-for="long_cash">Invested at least (%) <input id="mInvMin" type="number" step="5" value="0"></label>
+          <label data-for="long_cash">Invested at most (%) <input id="mInvMax" type="number" step="5" value="100"></label>
+          <label data-for="long_short">Net exposure (%) <input id="mNet" type="number" step="5" value="100"></label>
+          <label data-for="long_short market_neutral">Gross exposure limit (%) <input id="mGross" type="number" step="10" value="160"></label>
+          <label data-for="long_short market_neutral">Short borrow cost (% a year) <input id="mShortCost" type="number" step="0.1" value="0.5" min="0"></label>
+          <label data-for="leveraged">Maximum invested (%) <input id="mLev" type="number" step="10" value="150"></label>
+          <label data-for="leveraged">Borrowing spread over risk-free (%) <input id="mSpread" type="number" step="0.1" value="1" min="0"></label>
+          <label data-for="benchmark_relative">Benchmark <select id="mBench"></select></label>
+          <label data-for="benchmark_relative">Active weight limit ± (%, blank = none) <input id="mActive" type="number" step="1" min="0"></label>
+          <label data-for="benchmark_relative surplus"><span id="mBudgetText">Tracking-error budget (%, blank = none)</span> <input id="mBudget" type="number" step="0.5" min="0"></label>
+          <label data-for="surplus">Liability proxy <select id="mLiab"></select></label>
+          <label data-for="surplus">Funding ratio (%) <input id="mFund" type="number" step="5" value="100" min="1"></label>
+        </div>
+        <div class="controls inner">
+          <label>Turnover limit against <select id="mCur"><option value="">No turnover limit</option></select></label>
+          <label>Maximum turnover (%) <input id="mTurn" type="number" step="5" value="20" min="0"></label>
+        </div>
+        <div class="callout" id="mHelp"></div>
+      </section>
+      <section class="card">
         <h2>Constraints</h2>
-        <p class="sub">Minimum and maximum weight for each asset are set in the table at the top. Group limits cap or floor the combined weight of several assets, for example all equities.</p>
+        <p class="sub">Minimum and maximum weight for each asset are set in the table at the top (a negative minimum allows a short position, if the mandate permits). Group limits cap or floor the combined weight of several assets, for example all equities.</p>
         <div id="groups"></div>
         <button id="addGroup" class="btn ghost" type="button">Add a group limit</button>
         <div class="toolbar" style="margin-top:16px"><button id="aApply" class="btn" type="button">Apply and continue to optimise</button></div>

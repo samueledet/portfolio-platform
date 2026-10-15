@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from . import report as report_builder
 from .engine import attribution, currency, data, optimize, performance, risk, spending, stats
+from .engine import mandate as md
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SAMPLES = {
@@ -103,9 +104,38 @@ def check_weights(weights: list[float], n: int) -> np.ndarray:
     return w / w.sum()
 
 
+def mandate_of(ds: data.Dataset, body) -> md.Mandate:
+    return md.parse(getattr(body, "mandate", None), ds.n_assets)
+
+
+def weights_for(weights, n: int, m: md.Mandate) -> np.ndarray:
+    """Fully invested mandates rescale weights to 100%; others keep them, with the rest in cash."""
+    w = np.asarray(weights, dtype=float)
+    if w.shape != (n,):
+        raise ValueError(f"Expected {n} weights, one per asset.")
+    if not m.full_investment:
+        return w
+    if abs(w.sum()) < 1e-9:
+        raise ValueError("Weights sum to zero.")
+    return w / w.sum()
+
+
+def cash_line(m: md.Mandate, w: np.ndarray, rf: float) -> float:
+    """Annual return from the cash line net of borrowing spread and short costs."""
+    return m.cash_return(w, rf) - m.short_drag(w)
+
+
+AXES = {None: ("Risk: annualised volatility (σ)", "Expected annual return"),
+        "benchmark": ("Tracking error", "Active return vs benchmark"),
+        "surplus": ("Surplus risk", "Surplus return")}
+KEY_NAMES = {None: ("Minimum variance", "Maximum Sharpe"), "benchmark": ("Minimum tracking error", "Maximum information ratio"),
+             "surplus": ("Minimum surplus risk", "Best surplus return per unit of risk")}
+
+
 # ------------------------------------------------------------------ request models
 class Base(BaseModel):
     assumptions: dict | None = None
+    mandate: dict | None = None
     rf: float = 0.0
     start: str | None = None
     end: str | None = None
@@ -254,37 +284,52 @@ def optimise(dataset_id: str, body: OptimiseIn):
     ds = get(dataset_id)
     r, _, a = resolve(ds, body)
     return clean(optimize.optimise(a["mu"], a["cov"], body.objective, rf=body.rf, target=body.target,
-                                   constraints=body.constraints, scenarios=r, beta=body.beta))
+                                   constraints=body.constraints, scenarios=r, beta=body.beta,
+                                   mandate=mandate_of(ds, body), ppy=ds.periods_per_year))
 
 
 @app.post("/api/datasets/{dataset_id}/frontier")
 def frontier(dataset_id: str, body: FrontierIn):
     ds = get(dataset_id)
     r, _, a = resolve(ds, body)
-    mu, cov = a["mu"], a["cov"]
-    front = optimize.efficient_frontier(mu, cov, rf=body.rf, constraints=body.constraints, points=body.points)
-    key = {"Minimum variance": front["min_variance"], "Maximum return": front["max_return"]}
+    mu, cov, m, n = a["mu"], a["cov"], mandate_of(ds, body), ds.n_assets
+    front = optimize.efficient_frontier(mu, cov, rf=body.rf, constraints=body.constraints, points=body.points, mandate=m)
+    low, ratio = KEY_NAMES[m.relative]
+    key = {low: front["min_variance"], "Maximum return": front["max_return"]}
     notes = []
-    for label, objective in (("Maximum Sharpe", "max_sharpe"), ("Risk parity", "risk_parity")):
+    # under a long-only benchmark mandate the information ratio peaks at tiny active bets, so it is not offered
+    candidates = ([] if m.relative == "benchmark" else [(ratio, "max_sharpe")]) + \
+        ([("Risk parity", "risk_parity")] if m.kind == "long_only" and m.reference is None else [])
+    for label, objective in candidates:
         try:
-            key[label] = optimize.optimise(mu, cov, objective, rf=body.rf, constraints=body.constraints)
+            key[label] = optimize.optimise(mu, cov, objective, rf=body.rf, constraints=body.constraints, mandate=m)
         except optimize.Infeasible as exc:
             notes.append(f"{label}: {exc}")
-    n = ds.n_assets
-    key["Equal weight"] = optimize.describe(np.full(n, 1 / n), mu, cov, body.rf)
-    return clean({"points": front["points"], "portfolios": key, "notes": notes,
-                  "assets": [{"exp_return": mu[i], "volatility": a["vol"][i]} for i in range(n)]})
+    if m.kind != "market_neutral":
+        key["Equal weight"] = optimize.describe(np.full(n, 1 / n), mu, cov, body.rf, m, normalise=True)
+    if m.risk_budget is not None:
+        key["Maximum return"]["note"] = f"Uses the full {m.risk_budget:.1%} risk budget or less."
+    if m.relative == "benchmark":
+        key["Benchmark"] = optimize.describe(m.reference, mu, cov, body.rf, m, normalise=False)
+    elif m.relative == "surplus":
+        key["Liability hedge"] = optimize.describe(np.eye(n)[m.liability], mu, cov, body.rf, m, normalise=False)
+    x, y = AXES[m.relative]
+    return clean({"points": front["points"], "portfolios": key, "notes": notes, "axes": {"x": x, "y": y},
+                  "mandate": {"kind": m.kind, "label": m.label, "relative": m.relative, "full_investment": m.full_investment},
+                  "assets": [{**optimize.describe(np.eye(n)[i], mu, cov, body.rf, m, normalise=False), "exp_return": mu[i],
+                              "volatility": a["vol"][i]} for i in range(n)]})
 
 
 @app.post("/api/datasets/{dataset_id}/backtest")
 def backtest(dataset_id: str, body: BacktestIn):
     ds = get(dataset_id)
     r, dates = window(ds, body.start, body.end)
-    ppy = ds.periods_per_year
+    ppy, m = ds.periods_per_year, mandate_of(ds, body)
     series = {}
     for p in body.portfolios:
         series[p.name] = performance.portfolio_returns(
-            r, check_weights(p.weights, ds.n_assets), ppy=ppy, rebalance=body.rebalance, cost_bps=body.cost_bps)
+            r, weights_for(p.weights, ds.n_assets, m), ppy=ppy, rebalance=body.rebalance, cost_bps=body.cost_bps,
+            normalise=m.full_investment, cash_rate=body.rf, borrow_spread=m.borrow_spread, short_cost=m.short_cost)
     if body.benchmark and body.benchmark not in series:
         raise ValueError("The benchmark must be one of the portfolios in the request.")
     bench = series[body.benchmark][0] if body.benchmark else None
@@ -302,10 +347,11 @@ def backtest(dataset_id: str, body: BacktestIn):
 @app.post("/api/datasets/{dataset_id}/stress")
 def stress(dataset_id: str, body: StressIn):
     ds = get(dataset_id)
-    w = check_weights(body.weights, ds.n_assets)
-    ppy = ds.periods_per_year
-    windows = body.windows or risk.suggest_windows(ds.dates, ds.returns @ w, ppy)
-    result = {"windows": risk.window_analysis(ds.returns, ds.dates, w, windows, ppy=ppy, rf=body.rf)}
+    m = mandate_of(ds, body)
+    w = weights_for(body.weights, ds.n_assets, m)
+    ppy, extra = ds.periods_per_year, cash_line(m, w, body.rf)
+    windows = body.windows or risk.suggest_windows(ds.dates, ds.returns @ w + extra / ppy, ppy)
+    result = {"windows": risk.window_analysis(ds.returns, ds.dates, w, windows, ppy=ppy, rf=body.rf, extra_return=extra)}
     if body.shock_window:
         r, _ = window(ds, body.start, body.end)
         base = stats.resolve_assumptions(r, ppy, body.assumptions, rf=body.rf)["mu"]
@@ -321,9 +367,11 @@ def stress(dataset_id: str, body: StressIn):
 def simulate(dataset_id: str, body: SimulateIn):
     ds = get(dataset_id)
     r, _, a = resolve(ds, body)
-    w = check_weights(body.weights, ds.n_assets)
+    m = mandate_of(ds, body)
+    w = weights_for(body.weights, ds.n_assets, m)
     return clean(risk.monte_carlo(w, a["mu"], a["cov"], ppy=ds.periods_per_year, years=body.years, trials=body.trials,
-                                  method=body.method, seed=body.seed, history=r, df=body.df, rf=body.rf))
+                                  method=body.method, seed=body.seed, history=r, df=body.df, rf=body.rf,
+                                  extra_return=cash_line(m, w, body.rf)))
 
 
 @app.post("/api/datasets/{dataset_id}/report.xlsx")
@@ -336,6 +384,7 @@ def report(dataset_id: str, body: ReportIn):
     r, dates = window(ds, body.start, body.end)
     ppy = ds.periods_per_year
     a = stats.resolve_assumptions(r, ppy, body.assumptions, rf=body.rf)
+    m = mandate_of(ds, body)
     wb = Workbook()
     bold = Font(name="Arial", bold=True)
 
@@ -356,6 +405,8 @@ def report(dataset_id: str, body: ReportIn):
                      ["Risk-free rate (annual)", body.rf], ["Assumption source", (body.assumptions or {}).get("source", "historical")],
                      ["Return multiplier", (body.assumptions or {}).get("return_multiplier", 1.0)],
                      ["Volatility multiplier", (body.assumptions or {}).get("vol_multiplier", 1.0)],
+                     ["Mandate", m.label], ["Net exposure range", f"{m.net_min:.0%} to {m.net_max:.0%}"],
+                     ["Gross exposure limit", "none" if m.gross_max is None else f"{m.gross_max:.0%}"],
                      ["Rebalancing", body.rebalance], ["Trading cost (bps)", body.cost_bps],
                      ["Note", "Analytics output for review. Not investment advice."]], first=True)
     sheet("Assumptions", [["Asset", "Name", "Expected return", "Volatility", "Min weight", "Max weight"]] + [
@@ -364,10 +415,10 @@ def report(dataset_id: str, body: ReportIn):
          ((body.constraints or {}).get("upper") or [1.0] * ds.n_assets)[i]] for i in range(ds.n_assets)])
     sheet("Correlation", [[""] + ds.assets] + [[ds.assets[i]] + [float(x) for x in a["corr"][i]] for i in range(ds.n_assets)])
     sheet("Covariance", [[""] + ds.assets] + [[ds.assets[i]] + [float(x) for x in a["cov"][i]] for i in range(ds.n_assets)])
-    rows = [["Portfolio"] + ds.assets + ["Expected return", "Volatility", "Sharpe"]]
+    rows = [["Portfolio"] + ds.assets + ["Cash", "Gross exposure", "Expected return", "Volatility", "Sharpe", "Tracking / surplus risk"]]
     for p in body.portfolios:
-        d = optimize.describe(check_weights(p.weights, ds.n_assets), a["mu"], a["cov"], body.rf)
-        rows.append([p.name] + d["weights"] + [d["exp_return"], d["volatility"], d["sharpe"]])
+        d = optimize.describe(weights_for(p.weights, ds.n_assets, m), a["mu"], a["cov"], body.rf, m)
+        rows.append([p.name] + d["weights"] + [d["cash"], d["gross"], d["exp_return"], d["volatility"], d["sharpe"], d.get("tracking_error")])
     sheet("Portfolios", rows)
     bt = backtest(dataset_id, body)
     keys = ["ann_return", "volatility", "sharpe", "sortino", "max_drawdown", "cumulative", "worst", "best",
@@ -391,11 +442,19 @@ SOURCE_LABELS = {"historical": "historical estimates from the uploaded data", "c
 def attribute(dataset_id: str, body: AttributionIn):
     ds = get(dataset_id)
     r, dates, a = resolve(ds, body)
-    w = check_weights(body.weights, ds.n_assets)
-    b = check_weights(body.benchmark_weights, ds.n_assets) if body.benchmark_weights else None
+    m = mandate_of(ds, body)
+    w = weights_for(body.weights, ds.n_assets, m)
+    b = weights_for(body.benchmark_weights, ds.n_assets, m) if body.benchmark_weights else None
+    labels, risk_share = list(ds.assets), optimize.describe(w, a["mu"], a["cov"], body.rf, m, normalise=False)["risk_contribution"]
+    if abs(w.sum() - 1) > 1e-9 or (b is not None and abs(b.sum() - 1) > 1e-9):     # cash becomes its own line
+        rf_p = (1 + body.rf) ** (1 / ds.periods_per_year) - 1
+        r = np.column_stack([r, np.full(len(r), rf_p)])
+        w = np.append(w, 1 - w.sum())
+        b = np.append(b, 1 - b.sum()) if b is not None else None
+        labels, risk_share = labels + ["Cash"], risk_share + [0.0]
     out = attribution.attribute(r, w, b)
-    out["risk_contribution"] = optimize.describe(w, a["mu"], a["cov"], body.rf)["risk_contribution"]
-    return clean({**out, "start": str(dates[0].date()), "end": str(dates[-1].date())})
+    out["risk_contribution"] = risk_share
+    return clean({**out, "labels": labels, "start": str(dates[0].date()), "end": str(dates[-1].date())})
 
 
 @app.post("/api/datasets/{dataset_id}/currency")
@@ -417,10 +476,11 @@ def currency_hedge(dataset_id: str, body: CurrencyIn):
 def spending_policy(dataset_id: str, body: SpendingIn):
     ds = get(dataset_id)
     _, _, a = resolve(ds, body)
-    w = check_weights(body.weights, ds.n_assets)
+    m = mandate_of(ds, body)
+    w = weights_for(body.weights, ds.n_assets, m)
     kw = dict(years=body.years, trials=body.trials, seed=body.seed, rule=body.rule, smoothing_years=body.smoothing_years,
               hybrid_weight=body.hybrid_weight, inflation=body.inflation, inflation_vol=body.inflation_vol,
-              contribution=body.contribution, fee=body.fee)
+              contribution=body.contribution, fee=body.fee, extra_return=cash_line(m, w, body.rf), normalise=m.full_investment)
     out = spending.simulate(w, a["mu"], a["cov"], rate=body.rate, **kw)
     out.update({"rule_label": RULE_LABELS[body.rule], "inflation": body.inflation, "contribution": body.contribution, "fee": body.fee})
     if body.compare_rates:
@@ -436,35 +496,46 @@ def report_docx(dataset_id: str, body: ReportDocIn):
         raise ValueError("Add at least one portfolio before creating the report.")
     r, dates, a = resolve(ds, body)
     n, ppy = ds.n_assets, ds.periods_per_year
+    m = mandate_of(ds, body)
     names = [p.name for p in body.portfolios]
     focus = body.focus if body.focus in names else names[0]
-    fw = check_weights(body.portfolios[names.index(focus)].weights, n)
+    fw = weights_for(body.portfolios[names.index(focus)].weights, n, m)
+    extra = cash_line(m, fw, body.rf)
+    shared = {"assumptions", "mandate", "rf", "start", "end"}
     spec = body.assumptions or {}
     cons = body.constraints or {}
     sim = body.simulation or {}
     bench = body.benchmark if body.benchmark in names else None
     ctx = {
         "title": body.title, "client": body.client, "focus": focus, "rf": body.rf, "benchmark": bench,
+        "mandate": {"label": m.label, "relative": m.relative, "full_investment": m.full_investment, "net_min": m.net_min,
+                    "net_max": m.net_max, "gross_max": m.gross_max, "short_cost": m.short_cost, "borrow_spread": m.borrow_spread,
+                    "active_limit": m.active_limit, "turnover_max": m.turnover_max, "funding_ratio": m.funding_ratio,
+                    "liability": ds.assets[m.liability] if m.liability is not None else None},
+        "axes": dict(zip(("x", "y"), AXES[m.relative])),
         "assets": ds.assets, "dataset": summary(dataset_id), "window": (str(dates[0].date()), str(dates[-1].date())),
         "mu": a["mu"].tolist(), "vol": a["vol"].tolist(), "notes": a["notes"],
         "assumption_label": SOURCE_LABELS.get(spec.get("source", "historical"), "historical estimates")
         + (f", returns x {spec['return_multiplier']:g} and risk x {spec.get('vol_multiplier', 1):g}"
            if spec.get("return_multiplier", 1) != 1 or spec.get("vol_multiplier", 1) != 1 else ""),
-        "constraints": {"lower": cons.get("lower") or [0.0] * n, "upper": cons.get("upper") or [1.0] * n, "groups": cons.get("groups") or []},
-        "portfolios": [{"name": p.name, **{k: v for k, v in optimize.describe(check_weights(p.weights, n), a["mu"], a["cov"], body.rf).items()
+        "constraints": {"lower": cons.get("lower") or [(-1.0 if m.shorts else 0.0)] * n, "upper": cons.get("upper") or [max(1.0, m.net_max)] * n,
+                        "groups": cons.get("groups") or []},
+        "portfolios": [{"name": p.name, **{k: v for k, v in optimize.describe(weights_for(p.weights, n, m), a["mu"], a["cov"], body.rf, m).items()
                                               if k != "risk_contribution"}} for p in body.portfolios],
-        "frontier": frontier(dataset_id, FrontierIn(**body.model_dump(include={"assumptions", "rf", "start", "end", "constraints"}))),
-        "backtest": backtest(dataset_id, BacktestIn(**{**body.model_dump(include={"assumptions", "rf", "start", "end", "portfolios", "rebalance", "cost_bps"}), "benchmark": bench})),
+        "frontier": frontier(dataset_id, FrontierIn(**body.model_dump(include=shared | {"constraints"}))),
+        "backtest": backtest(dataset_id, BacktestIn(**{**body.model_dump(include=shared | {"portfolios", "rebalance", "cost_bps"}), "benchmark": bench})),
         "rebalance_label": {"every_period": "rebalanced every period", "monthly": "rebalanced monthly", "quarterly": "rebalanced quarterly",
                             "annual": "rebalanced annually", "never": "never rebalanced (buy and hold)"}.get(body.rebalance, body.rebalance),
         "cost_bps": body.cost_bps,
-        "stress": risk.window_analysis(ds.returns, ds.dates, fw, body.stress_windows or risk.suggest_windows(ds.dates, ds.returns @ fw, ppy), ppy=ppy, rf=body.rf),
+        "stress": risk.window_analysis(ds.returns, ds.dates, fw, body.stress_windows or risk.suggest_windows(ds.dates, ds.returns @ fw + extra / ppy, ppy),
+                                       ppy=ppy, rf=body.rf, extra_return=extra),
         "simulation": risk.monte_carlo(fw, a["mu"], a["cov"], ppy=ppy, years=float(sim.get("years", 5)), trials=int(sim.get("trials", 5000)),
-                                       method=sim.get("method", "normal"), seed=int(sim.get("seed", 42)), history=r, rf=body.rf),
-        "attribution": attribution.attribute(r, fw, check_weights(body.portfolios[names.index(bench)].weights, n) if bench and bench != focus else None),
+                                       method=sim.get("method", "normal"), seed=int(sim.get("seed", 42)), history=r, rf=body.rf, extra_return=extra),
+        "attribution": attribute(dataset_id, AttributionIn(**body.model_dump(include=shared), weights=fw.tolist(),
+                                 benchmark_weights=body.portfolios[names.index(bench)].weights if bench and bench != focus else None)),
     }
     if body.spending:
-        ctx["spending"] = spending_policy(dataset_id, SpendingIn(**{**body.model_dump(include={"assumptions", "rf", "start", "end"}),
+        ctx["spending"] = spending_policy(dataset_id, SpendingIn(**{**body.model_dump(include=shared),
                                                                     **body.spending, "weights": fw.tolist()}))
     content = report_builder.build(ctx)
     return StreamingResponse(io.BytesIO(content), media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",

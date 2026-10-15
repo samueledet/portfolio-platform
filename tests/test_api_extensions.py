@@ -79,3 +79,39 @@ def test_committee_report_is_a_complete_word_document(ds):
     assert len(doc.inline_shapes) == 6 and len(doc.tables) >= 7          # charts and tables made it in
     plain = client.post(f"/api/datasets/{ds['id']}/report.docx", json={"portfolios": ports[:1]})
     assert plain.status_code == 200 and "Spending policy" not in "\n".join(p.text for p in Document(io.BytesIO(plain.content)).paragraphs)
+
+
+# ------------------------------------------------------------------ mandates through the API
+@pytest.mark.parametrize("mandate", [
+    {"kind": "long_short", "net": 1.0, "gross": 1.6, "short_cost": 0.005},
+    {"kind": "market_neutral", "gross": 2.0},
+    {"kind": "leveraged", "leverage": 1.5, "borrow_spread": 0.01},
+    {"kind": "benchmark_relative", "benchmark": [0.3, 0.1, 0.1, 0.1, 0.3, 0.1], "active_limit": 0.1},
+    {"kind": "surplus", "liability": 4, "funding_ratio": 1.1},
+])
+def test_every_step_runs_under_each_mandate(ds, mandate):
+    common = {"mandate": mandate, "rf": 0.02}
+    f = post(ds, "frontier", **common)
+    assert len(f["points"]) > 5 and f["axes"]["x"] and f["mandate"]["kind"] == mandate["kind"]
+    ports = [{"name": k, "weights": v["weights"]} for k, v in f["portfolios"].items()]
+    bt = post(ds, "backtest", portfolios=ports, benchmark=ports[-1]["name"], **common)
+    assert all(p["metrics"]["periods"] == 215 for p in bt["portfolios"])
+    w = ports[0]["weights"]
+    assert post(ds, "stress", weights=w, **common)["windows"]
+    assert 0 <= post(ds, "simulate", weights=w, years=2, trials=300, **common)["prob_loss"] <= 1
+    assert post(ds, "spending", weights=w, years=10, trials=300, **common)["years"] == 10
+    at = post(ds, "attribution", weights=w, benchmark_weights=ports[-1]["weights"], **common)
+    assert sum(at["contribution"]) == pytest.approx(at["total_return"], abs=1e-9)
+    res = client.post(f"/api/datasets/{ds['id']}/report.docx", json={"portfolios": ports, "focus": ports[0]["name"], **common,
+                                                                     "simulation": {"years": 2, "trials": 300}})
+    assert res.status_code == 200, res.text
+    assert "Mandate:" in "\n".join(p.text for p in Document(io.BytesIO(res.content)).paragraphs)
+
+
+def test_market_neutral_backtest_keeps_its_cash_and_shorts(ds):
+    w = [0.3, -0.3, 0.0, 0.0, 0.2, -0.2]                     # net zero: 100% cash collateral
+    bt = post(ds, "backtest", portfolios=[{"name": "MN", "weights": w}], mandate={"kind": "market_neutral"}, rf=0.03)
+    plain = post(ds, "backtest", portfolios=[{"name": "MN", "weights": w}], rf=0.03, mandate={"kind": "market_neutral", "short_cost": 0.0})
+    assert bt["portfolios"][0]["metrics"]["ann_return"] == pytest.approx(plain["portfolios"][0]["metrics"]["ann_return"])
+    bad = client.post(f"/api/datasets/{ds['id']}/optimise", json={"objective": "min_variance", "constraints": {"lower": [-0.2] * 6}})
+    assert bad.status_code == 422 and "short positions" in bad.json()["detail"]

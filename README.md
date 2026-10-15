@@ -33,6 +33,7 @@ Demo links load a sample and run through to a step, for example
 |---|---|
 | 1 Data | Upload CSV or Excel (dates in the first column, one column per asset). Prices or returns and the frequency are detected and can be overridden. |
 | 2 Assumptions | Expected returns and risk from history, custom forecasts, a weighted blend of several forecast sets, or Black–Litterman views. Custom correlations, sample or shrinkage covariance, optimistic and pessimistic tilts. Minimum, maximum and group weight limits. |
+| 2 Mandate | Long-only fully invested, long-only with cash, long/short (e.g. 130/30) with net and gross exposure limits and short borrow costs, market neutral, leveraged with a borrowing spread, benchmark-relative with a tracking-error budget and active-weight limits, or surplus / liability-driven with a funding ratio. A turnover limit against the current portfolio works with any of them. Every later step (optimiser, backtest, stress test, simulation, spending, attribution, reports) follows the mandate. |
 | 3 Optimise | Efficient frontier under the constraints, with reference portfolios. Add portfolios for a risk limit, a return target, maximum Sharpe, minimum variance, minimum tail loss (CVaR) or risk parity, or type custom weights. |
 | 4 Backtest | Apply each portfolio to the actual returns with a rebalancing rule and trading cost. Attribution shows each asset's contribution to return and the allocation effect against a benchmark. |
 | 5 Stress test | Portfolio behaviour in the crisis periods the data covers and in its own worst drawdown, plus a severity slider for any window. |
@@ -48,7 +49,8 @@ Demo links load a sample and run through to a step, for example
 pcp/engine/       analytics library: pure functions, no web code
   data.py         file loading, type and frequency detection, cleaning
   stats.py        statistics, covariance, blending, Black-Litterman, correlation repair
-  optimize.py     constrained optimisation (CVXPY): mean-variance, CVaR, risk parity, frontier
+  mandate.py      investment mandates: exposure limits, cash, leverage, shorts, benchmark and liability reference
+  optimize.py     constrained optimisation (CVXPY) under any mandate: mean-variance, CVaR, risk parity, frontier
   performance.py  rebalanced portfolio returns and performance metrics
   attribution.py  return contribution and allocation effect
   risk.py         stress windows, shock sensitivity, Monte Carlo
@@ -73,6 +75,8 @@ python -m pytest tests -q
 - Unit 4: the optimistic CMEs, the SAA weights, and the 3, 5 and 10-year backtest tables
 - Unit 5: the SAA weights, the 1.44× oil-shock break-even, and the Monte Carlo scenario inputs
 - Unit 6: return, volatility, downside deviation, Sortino, skewness and kurtosis for SAA and TAA, and the unhedged return of the UK carve-out
+
+`tests/test_mandates.py` checks each mandate: limits hold, a wider mandate never does worse, market-neutral cash earns the risk-free rate, a fully funded surplus mandate hedges the liability exactly, and the tracking-error budget binds.
 
 `tests/test_extensions.py` covers the methods the workbooks do not have. Examples: a certain Black–Litterman view is honoured exactly, attribution effects add up to the active return, a zero-volatility spending case matches a hand calculation.
 
