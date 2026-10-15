@@ -3,6 +3,7 @@ import json
 import pathlib
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from pcp.engine import mandate as md
@@ -128,3 +129,21 @@ def test_risk_budget_caps_tracking_error_for_every_objective():
     assert opt(spec, "max_return")["tracking_error"] == pytest.approx(0.03, abs=1e-4)   # the budget binds
     front = optimize.efficient_frontier(MU, COV, rf=RF, mandate=md.parse(spec, N), points=15)["points"]
     assert max(p["tracking_error"] for p in front) <= 0.03 + 1e-5
+
+
+def test_stress_windows_reach_2026_and_detect_new_drawdowns():
+    dates = pd.bdate_range("2007-01-02", "2026-10-14")
+    rng = np.random.default_rng(0)
+    r = rng.normal(0.0003, 0.008, len(dates))
+    names = [w["name"] for w in risk.suggest_windows(dates, r, 252)]
+    for expected in ("2025 tariff shock", "Aug 2024 yen carry-trade unwind", "Q1 2026 equity sell-off", "Mid-2026 emerging-market sell-off"):
+        assert expected in names
+    short = risk.suggest_windows(pd.bdate_range("2008-01-02", "2026-10-14"), r[-4900:][:len(pd.bdate_range("2008-01-02", "2026-10-14"))], 252)
+    assert any(n["name"].startswith("Global financial crisis (partial") for n in short)      # mostly covered: kept, trimmed
+    # a fresh 20% fall after the last named crisis is found automatically and flagged as ongoing
+    d2 = pd.bdate_range("2026-01-02", "2027-03-31")
+    r2 = np.full(len(d2), 0.0004)
+    r2[-40:] = -0.0056
+    eps = risk.drawdown_episodes(d2, r2, 0.1)
+    assert eps[0]["ongoing"] and eps[0]["depth"] < -0.19
+    assert any(w["name"].startswith("Current drawdown") for w in risk.suggest_windows(d2, r2, 252))

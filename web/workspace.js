@@ -504,12 +504,13 @@ function drawAttr() {
 async function runStress() {
   const p = pickPortfolio('sPort'), body = { ...common(), weights: p.weights };
   let res = await call('stress', body);
-  let windows = res.windows.map(w => ({ name: w.name, start: w.start, end: w.end }));
+  let windows = res.windows.map(w => ({ name: w.name, start: w.start, end: w.end, kind: w.kind }));
   if ($('sStart').value && $('sEnd').value) {
     windows = [...windows, { name: 'Custom window', start: $('sStart').value, end: $('sEnd').value }];
     res = await call('stress', { ...body, windows });
   }
   S.stress = { ...res, portfolio: p.name, weights: p.weights, list: windows };
+  S.stress.show = defaultShown(res.windows);
   S.sens = null;
   const ok = res.windows.filter(w => !w.error);
   $('shWindow').innerHTML = ok.map(w => `<option value="${esc(w.name)}">${esc(w.name)}</option>`).join('');
@@ -520,21 +521,34 @@ async function runShock() {
   S.sens = (await call('stress', { ...common(), weights: S.stress.weights, windows: [w], shock_window: w })).sensitivity;
   drawStress();
 }
+/* Windows ticked for the path chart: by default the crises since 2023, the worst drawdown and any custom window. */
+function defaultShown(W) {
+  const ok = W.filter(w => !w.error);
+  const pick = ok.filter(w => w.end >= '2023-01-01' || w.kind === 'detected' && /Worst|Current/.test(w.name) || w.name === 'Custom window');
+  return new Set((pick.length ? pick : ok).slice(-8).map(w => w.name));
+}
 function drawStress() {
   refreshSelectors();
   $('stressOut').hidden = !S.stress; $('shockCard').hidden = !S.sens;
   if (!S.stress) return;
-  const W = S.stress.windows, ok = W.filter(w => !w.error);
-  table('stressTable', ['Window', 'Period', 'Observations', 'Annualised return', 'Risk σ', 'Cumulative return', 'Max drawdown'],
-    W.map(w => (w.error ? [`<b>${esc(w.name)}</b>`, `${w.start} → ${w.end}`, w.periods, `<span class="muted">${esc(w.error)}</span>`, '', '', '']
-      : [`<span class="sw-inline" style="background:${SERIES[ok.indexOf(w)]}"></span><b>${esc(w.name)}</b>`, `${w.start} → ${w.end}`, w.periods,
+  const W = S.stress.windows, ok = W.filter(w => !w.error), show = S.stress.show;
+  const shown = ok.filter(w => show.has(w.name)), colour = w => SERIES[shown.indexOf(w)] || 'var(--axis)';
+  const badge = w => `<span class="status">${w.kind === 'detected' ? 'Detected' : w.name === 'Custom window' ? 'Custom' : 'Named crisis'}</span>`;
+  table('stressTable', ['Show', 'Window', 'Type', 'Period', 'Days', 'Annualised return', 'Risk σ', 'Cumulative return', 'Max drawdown'],
+    W.map(w => (w.error ? ['', `<b>${esc(w.name)}</b>`, badge(w), `${w.start} → ${w.end}`, w.periods, `<span class="muted">${esc(w.error)}</span>`, '', '', '']
+      : [`<input type="checkbox" class="st-show" data-name="${esc(w.name)}" ${show.has(w.name) ? 'checked' : ''} aria-label="Show ${esc(w.name)} in the chart">`,
+        `${show.has(w.name) ? `<span class="sw-inline" style="background:${colour(w)}"></span>` : ''}<b>${esc(w.name)}</b>`, badge(w), `${w.start} → ${w.end}`, w.periods,
         `<span class="${w.mean_ann_return < 0 ? 'neg' : ''}">${pct(w.mean_ann_return, 1)}</span>`, pct(w.volatility, 1), `<span class="${w.cumulative < 0 ? 'neg' : ''}">${pct(w.cumulative, 1)}</span>`, pct(w.max_drawdown, 1)])));
-  if (ok.length) {
-    const n = Math.max(...ok.map(w => w.path.length));
+  if (shown.length) {
+    const n = Math.max(...shown.map(w => w.path.length));
     lineChart($('stressChart'), { labels: Array.from({ length: n }, (_, i) => i), legend: 'stressLegend', endLabels: false,
-      series: ok.map((w, k) => ({ name: w.name, color: SERIES[k], values: Array.from({ length: n }, (_, i) => w.path[i] ?? null) })),
-      yFmt: v => v.toFixed(2), xFmt: i => String(i), xlabel: `${S.ds.frequency} periods since the start of each window · ${S.stress.portfolio}`, tipTitle: i => `Period ${i}` });
-  } else $('stressChart').innerHTML = '<p class="empty">No stress window falls inside this data. Add a custom window above.</p>';
+      series: shown.map(w => ({ name: w.name, color: colour(w), values: Array.from({ length: n }, (_, i) => w.path[i] ?? null) })),
+      yFmt: v => signed(v - 1, 1), valFmt: v => signed(v - 1, 2), xFmt: i => String(i), endLabels: false,
+      xlabel: `${S.ds.frequency} periods since the start of each window · cumulative return · ${S.stress.portfolio}`, tipTitle: i => `Period ${i}` });
+  } else {
+    $('stressChart').innerHTML = `<p class="empty">${ok.length ? 'Tick at least one window in the table to chart it.' : 'No stress window falls inside this data. Add a custom window above.'}</p>`;
+    $('stressLegend').innerHTML = '';
+  }
   if (S.sens) drawShock();
 }
 function drawShock() {
@@ -706,6 +720,16 @@ async function init() {
   $('runBacktest').addEventListener('click', ev => run(ev.target, runBacktest));
   $('runAttr').addEventListener('click', ev => run(ev.target, runAttr));
   $('runStress').addEventListener('click', ev => run(ev.target, runStress));
+  $('stressTable').addEventListener('change', ev => {
+    const t = ev.target; if (!t.classList.contains('st-show')) return;
+    t.checked ? S.stress.show.add(t.dataset.name) : S.stress.show.delete(t.dataset.name); drawStress();
+  });
+  $('stressPick').addEventListener('click', ev => {
+    const k = ev.target.dataset.pick; if (!k || !S.stress) return;
+    const ok = S.stress.windows.filter(w => !w.error);
+    S.stress.show = k === 'recent' ? defaultShown(S.stress.windows) : new Set(k === 'all' ? ok.map(w => w.name) : k === 'named' ? ok.filter(w => w.kind !== 'detected').map(w => w.name) : []);
+    drawStress();
+  });
   $('shWindow').addEventListener('change', () => run(null, runShock));
   $('shSev').addEventListener('input', drawShock);
   $('runSim').addEventListener('click', ev => run(ev.target, runSim));

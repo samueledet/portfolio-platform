@@ -6,7 +6,8 @@ import pandas as pd
 
 from .performance import wealth_and_drawdown
 
-# Well-known episodes; only those inside the uploaded history are offered.
+# Well-known episodes; only those inside the uploaded history are offered. Windows run from the market peak to
+# the trough. The 2023-2026 windows were dated from daily S&P 500, Russell 2000 and MSCI EM ETF data.
 KNOWN_WINDOWS = [
     ("Dot-Com bubble burst", "2000-03-01", "2002-10-31"),
     ("Global financial crisis", "2007-10-01", "2009-03-31"),
@@ -15,23 +16,79 @@ KNOWN_WINDOWS = [
     ("Q4 2018 sell-off", "2018-10-01", "2018-12-31"),
     ("COVID-19 crash", "2020-02-01", "2020-04-30"),
     ("2022 inflation shock", "2022-01-01", "2022-10-31"),
+    ("2023 US regional bank crisis (SVB)", "2023-02-02", "2023-03-23"),
+    ("2023 bond sell-off (higher for longer)", "2023-07-31", "2023-10-27"),
+    ("Aug 2024 yen carry-trade unwind", "2024-07-16", "2024-08-05"),
+    ("2025 tariff shock", "2025-02-19", "2025-04-08"),
+    ("Q1 2026 equity sell-off", "2026-01-27", "2026-03-30"),
+    ("Mid-2026 emerging-market sell-off", "2026-06-22", "2026-07-29"),
 ]
 
 
-def suggest_windows(dates: pd.DatetimeIndex, portfolio: np.ndarray, ppy: int) -> list[dict]:
-    """Known crises covered by the data, plus the portfolio's own worst peak-to-trough episode."""
+def drawdown_episodes(dates: pd.DatetimeIndex, series: np.ndarray, threshold: float) -> list[dict]:
+    """Peak-to-trough falls deeper than `threshold` in a return series, newest first.
+
+    An episode that has not yet recovered to its previous peak is flagged as ongoing.
+    """
+    wealth, dd = wealth_and_drawdown(series)
+    out, k, n = [], 1, len(wealth)
+    while k < n:
+        if dd[k] >= 0:
+            k += 1
+            continue
+        peak = k - 1                                 # last running high before the fall
+        j = k
+        while j < n and dd[j] < 0:
+            j += 1
+        trough = peak + 1 + int(np.argmin(wealth[peak + 1:j]))
+        depth = float(wealth[trough] / wealth[peak] - 1)
+        if depth <= -threshold:
+            out.append({"start": str(dates[peak].date()), "end": str(dates[trough - 1].date()),
+                        "depth": depth, "ongoing": j >= n})
+        k = j + 1
+    return out[::-1]
+
+
+def suggest_windows(dates: pd.DatetimeIndex, portfolio: np.ndarray, ppy: int, max_detected: int = 3) -> list[dict]:
+    """Known crises covered by the data, the portfolio's own worst drawdown, and its recent large drawdowns.
+
+    Detected drawdowns keep the list current beyond the named crises: any fall of at least half the
+    portfolio's annual volatility (and at least 5%) that does not overlap a named window is added.
+    """
     out = []
+    min_obs = max(3, ppy // 52)                      # a three-week crisis is visible in daily or weekly data
     for name, start, end in KNOWN_WINDOWS:
         s, e = pd.Timestamp(start), pd.Timestamp(end)
         inside = (dates >= s) & (dates <= e)
-        if inside.sum() >= max(3, ppy // 6) and dates[0] <= s + pd.Timedelta(days=45):
-            out.append({"name": name, "start": start, "end": end})
+        covered = (min(e, dates[-1]) - max(s, dates[0])).days / max((e - s).days, 1)
+        if inside.sum() < min_obs or covered < 0.5:                 # keep windows the data mostly covers
+            continue
+        if dates[0] > s + pd.Timedelta(days=7) or dates[-1] < e - pd.Timedelta(days=7):
+            s0, e0 = max(s, dates[0]), min(e, dates[-1])
+            out.append({"name": f"{name} (partial: data covers {s0:%b %Y} to {e0:%b %Y})", "start": str(s0.date()),
+                        "end": str(e0.date()), "kind": "named"})
+        else:
+            out.append({"name": name, "start": start, "end": end, "kind": "named"})
+    if len(portfolio) < 2:
+        return out
     wealth, dd = wealth_and_drawdown(portfolio)
     trough = int(dd.argmin())
     if trough > 0 and dd[trough] < -0.02:
         peak = int(wealth[:trough + 1].argmax())
-        out.append({"name": "Worst drawdown in this data",
-                    "start": str(dates[max(peak, 0)].date()), "end": str(dates[trough - 1].date())})
+        ongoing = wealth[trough:].max() < wealth[peak]
+        out.append({"name": "Current drawdown, the worst in this data (not yet recovered)" if ongoing else "Worst drawdown in this data",
+                    "start": str(dates[max(peak, 0)].date()),
+                    "end": str(dates[trough - 1].date()), "kind": "detected"})
+    vol = float(np.std(portfolio, ddof=1) * np.sqrt(ppy))
+    overlaps = lambda a, b: pd.Timestamp(a["start"]) <= pd.Timestamp(b["end"]) and pd.Timestamp(b["start"]) <= pd.Timestamp(a["end"])
+    added = 0
+    for ep in drawdown_episodes(dates, portfolio, max(0.05, 0.5 * vol)):
+        if added >= max_detected or any(overlaps(ep, w) for w in out):
+            continue
+        label = "Current drawdown (not yet recovered)" if ep["ongoing"] else \
+            f"Drawdown {pd.Timestamp(ep['start']):%b %Y} to {pd.Timestamp(ep['end']):%b %Y}"
+        out.append({"name": label, "start": ep["start"], "end": ep["end"], "kind": "detected"})
+        added += 1
     return out
 
 

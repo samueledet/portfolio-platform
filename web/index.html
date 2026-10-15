@@ -193,7 +193,7 @@
     <div class="panel" id="p-stress" hidden>
       <section class="card">
         <div class="row-between"><h2>Historical stress windows</h2><button id="runStress" class="btn" type="button">Run stress test</button></div>
-        <p class="sub">How the chosen portfolio behaved in crisis periods covered by your data, plus its own worst drawdown.</p>
+        <p class="sub">How the chosen portfolio behaved in named crises covered by your data (from the Dot-Com bust to the mid-2026 emerging-market sell-off), plus drawdowns detected in the portfolio itself, so new episodes appear automatically as the data updates.</p>
         <div class="controls inner">
           <label>Portfolio <select id="sPort"></select></label>
           <label>Custom window start <input id="sStart" type="date"></label>
@@ -202,6 +202,8 @@
         <div id="stressOut" hidden>
           <div class="table-wrap"><table id="stressTable" class="data"></table></div>
           <h3 style="margin-top:16px">Portfolio path through each window</h3>
+          <div class="toolbar"><span class="muted">Show in chart:</span><div class="seg" id="stressPick" role="group" aria-label="Windows to chart">
+            <button type="button" data-pick="recent">Recent (2023 onward)</button><button type="button" data-pick="named">Named crises</button><button type="button" data-pick="all">All</button><button type="button" data-pick="none">None</button></div></div>
           <div id="stressLegend" class="legend"></div><div id="stressChart" class="chart"></div>
         </div>
       </section>

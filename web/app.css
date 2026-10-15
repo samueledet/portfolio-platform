@@ -52,3 +52,7 @@ table.matrix td.muted { color: var(--text-muted); }
 
 /* the hidden attribute must win over component display rules */
 [hidden] { display: none !important; }
+
+/* stress table: tick box first, then left-aligned window names */
+#stressTable td:nth-child(2), #stressTable th:nth-child(2) { text-align: left; }
+#stressTable td:first-child, #stressTable th:first-child { width: 44px; text-align: center; }
