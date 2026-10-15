@@ -11,14 +11,17 @@ import uuid
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import decisions
 from . import report as report_builder
 from .engine import attribution, currency, data, optimize, performance, risk, spending, stats
 from .engine import mandate as md
+from .engine import rebalance as rb
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SAMPLES = {
@@ -558,6 +561,96 @@ def report_docx(dataset_id: str, body: ReportDocIn):
     content = report_builder.build(ctx)
     return StreamingResponse(io.BytesIO(content), media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                              headers={"Content-Disposition": 'attachment; filename="investment_committee_report.docx"'})
+
+
+# ------------------------------------------------------------------ quarterly rebalancing
+class RebalanceIn(Base):
+    target: list[float]
+    current: list[float]
+    units: str = "weights"                  # "weights" (fractions) or "amounts" (money)
+    abs_band: float = Field(0.02, ge=0, le=1)
+    rel_band: float = Field(0.25, ge=0, le=5)
+    policy: str = "breached_to_target"
+    cost_bps: float = Field(0.0, ge=0, le=500)
+
+
+class DecisionIn(BaseModel):
+    dataset: str
+    assets: list[str]
+    target_name: str = ""
+    target: list[float]
+    current: list[float]
+    post: list[float]
+    trades: list[float]
+    band: list[float]
+    policy: str
+    balance: float | None = None
+    note: str = ""
+    decision_date: str | None = None
+
+
+@app.post("/api/datasets/{dataset_id}/rebalance")
+def rebalance_plan(dataset_id: str, body: RebalanceIn):
+    ds = get(dataset_id)
+    n = ds.n_assets
+    cur, tgt = np.asarray(body.current, dtype=float), np.asarray(body.target, dtype=float)
+    if cur.shape != (n,) or tgt.shape != (n,):
+        raise ValueError(f"Enter one current holding and one target weight for each of the {n} assets.")
+    balance = float(cur.sum()) if body.units == "amounts" else None
+    if balance is not None and balance <= 0:
+        raise ValueError("Enter the amount held in each fund.")
+    band = rb.bands(tgt / tgt.sum(), body.abs_band, body.rel_band)
+    out = rb.plan(cur, tgt, band, body.policy, balance=balance, cost_bps=body.cost_bps)
+    _, _, a = resolve(ds, body)
+    m = md.parse({"kind": "benchmark_relative", "benchmark": out["target"]}, n)       # tracking error vs target
+    out["risk"] = {k: optimize.describe(np.asarray(out[k]), a["mu"], a["cov"], body.rf, m) for k in ("current", "post", "target")}
+    out["assets"] = ds.assets
+    return clean(out)
+
+
+@app.post("/api/datasets/{dataset_id}/rebalance/drifted")
+def rebalance_drifted(dataset_id: str):
+    """Estimate today's weights from the last recorded decision and the returns in this dataset since then."""
+    ds = get(dataset_id)
+    levels = pd.DataFrame(np.cumprod(1 + ds.returns, axis=0), index=ds.dates, columns=ds.assets)
+    return clean(decisions.drift_from_last(levels))
+
+
+@app.post("/api/rebalance/log")
+def rebalance_record(body: DecisionIn):
+    if not (len(body.assets) == len(body.target) == len(body.post) == len(body.trades) == len(body.band)):
+        raise ValueError("Every list in a decision needs one value per asset.")
+    entry = body.model_dump()
+    entry["decision_date"] = body.decision_date or str(pd.Timestamp.today().date())
+    return decisions.append(entry)
+
+
+@app.get("/api/rebalance/log")
+def rebalance_history():
+    return decisions.read_all()[::-1]
+
+
+@app.get("/api/rebalance/log.csv")
+def rebalance_history_csv():
+    rows = ["decision_date,recorded_at,target_name,policy,asset,target,current,post,trade,band,balance,note"]
+    for e in decisions.read_all():
+        for i, a in enumerate(e["assets"]):
+            note = (e.get("note") or "").replace('"', "'")
+            rows.append(f'{e["decision_date"]},{e["recorded_at"]},"{e.get("target_name", "")}",{e["policy"]},"{a}",'
+                        f'{e["target"][i]:.6f},{e["current"][i]:.6f},{e["post"][i]:.6f},{e["trades"][i]:.6f},{e["band"][i]:.6f},'
+                        f'{e.get("balance") or ""},"{note}"')
+    return StreamingResponse(io.BytesIO(chr(10).join(rows).encode()), media_type="text/csv",
+                             headers={"Content-Disposition": 'attachment; filename="rebalancing_decisions.csv"'})
+
+
+@app.get("/api/rebalance/alert")
+def rebalance_alert():
+    """The weekly job's latest drift check, or a fresh one from the DC plan file."""
+    if decisions.ALERT.exists():
+        return json.loads(decisions.ALERT.read_text(encoding="utf-8"))
+    if DC_FILE.exists():
+        return clean(decisions.drift_from_last(pd.read_csv(DC_FILE, header=1, index_col=0, parse_dates=True)))
+    return {"available": False, "message": "No drift check has run yet."}
 
 
 app.mount("/", StaticFiles(directory=ROOT / "web", html=True), name="web")

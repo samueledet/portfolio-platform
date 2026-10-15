@@ -27,6 +27,7 @@
       <button type="button" data-step="simulate" disabled>6 Simulate</button>
       <button type="button" data-step="spending" disabled>7 Spending policy</button>
       <button type="button" data-step="currency" disabled>8 Currency</button>
+      <button type="button" data-step="rebalance" disabled>9 Rebalance</button>
     </nav>
   </header>
 
@@ -294,6 +295,48 @@
             <div><h3>Summary</h3><div class="table-wrap"><table id="fxTable" class="data"></table></div></div>
           </div>
         </div>
+      </section>
+    </div>
+    <!-- 9 REBALANCE -->
+    <div class="panel" id="p-rebalance" hidden>
+      <div class="callout" id="rbAlert" hidden></div>
+      <section class="card">
+        <div class="row-between"><h2>Quarterly rebalance</h2><button id="runRb" class="btn" type="button">Check drift</button></div>
+        <p class="sub">Enter what you hold today, from your plan statement. Each holding may drift within a band around its target. Only a holding outside its band triggers trades, which keeps trading (and second-guessing) to a minimum.</p>
+        <div class="controls inner">
+          <label>Target weights <select id="rbTarget"></select></label>
+          <label>Holdings entered as <select id="rbUnits"><option value="amounts">Amounts ($)</option><option value="weights">Percent of the account</option></select></label>
+          <label>Band: at least ± (points) <input id="rbAbs" type="number" step="0.5" min="0" value="2"></label>
+          <label>Band: share of target ± (%) <input id="rbRel" type="number" step="5" min="0" value="25"></label>
+          <label>When a band is breached <select id="rbPolicy">
+            <option value="breached_to_target">Trade the breached holdings back to target</option>
+            <option value="to_band_edge">Trade the breached holdings to their band edge (least trading)</option>
+            <option value="all_to_target">Bring every holding back to target</option></select></label>
+          <label>Trading cost (bps) <input id="rbCost" type="number" step="1" min="0" value="0"></label>
+        </div>
+        <p class="sub small" id="rbBandHelp"></p>
+        <div class="table-wrap"><table id="rbInput" class="data inputs"></table></div>
+        <div class="toolbar" style="margin-top:10px"><button id="rbDrifted" class="btn ghost" type="button">Estimate today's weights from my last decision</button><span class="muted" id="rbTotal"></span></div>
+      </section>
+      <section class="card" id="rbOut" hidden>
+        <h2>What to do this quarter</h2>
+        <div class="callout" id="rbAction"></div>
+        <div class="kpis kpis-inline" id="rbKpis"></div>
+        <h3>Drift from target</h3>
+        <p class="sub small">Grey bands show how far each holding may drift; an orange bar is outside its band.</p>
+        <div id="rbChart" class="chart"></div>
+        <div class="table-wrap"><table id="rbTable" class="data"></table></div>
+        <h3 style="margin-top:16px">Record this decision</h3>
+        <div class="controls inner">
+          <label>Decision date <input id="rbDate" type="date"></label>
+          <label style="flex:1 1 360px">Why (kept in the log) <input id="rbNote" type="text" placeholder="e.g. Q4 review: US equity above band after rally" style="width:100%"></label>
+          <button id="rbSave" class="btn" type="button">Record decision</button>
+        </div>
+      </section>
+      <section class="card">
+        <div class="row-between"><h2>Decision log</h2><a class="btn ghost" href="/api/rebalance/log.csv" download>Download CSV</a></div>
+        <p class="sub">Every recorded decision, newest first. The weekly data update also checks whether your last recorded holdings have drifted out of their bands since then.</p>
+        <div class="table-wrap"><table id="rbLog" class="data"></table></div>
       </section>
     </div>
   </main>

@@ -17,7 +17,7 @@ import traceback
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from pcp import feeds  # noqa: E402
+from pcp import decisions, feeds  # noqa: E402
 from pcp.engine import data  # noqa: E402
 
 
@@ -51,6 +51,10 @@ def main() -> int:
         log(f"Done: {meta['rows']} days from {meta['start']} to {meta['end']} written to {out.relative_to(ROOT)}")
         for w in meta["warnings"]:
             log(f"WARNING {w}")
+        try:                                   # between-quarter check of the last recorded rebalancing decision
+            decisions.drift_check(out, log=log)
+        except Exception as exc:
+            log(f"Drift check failed: {exc}")
         return 0
     except Exception as exc:
         log(f"FAILED: {exc}")

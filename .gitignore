@@ -6,3 +6,4 @@ __pycache__/
 *.xlsx
 !sample_data/*.xlsx
 data/dc_plan/
+data/decisions/

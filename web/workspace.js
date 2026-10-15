@@ -16,9 +16,9 @@ const MANDATE_HELP = {
 };
 const S = {
   ds: null, step: 'data', rf: 0, start: null, end: null, assume: freshAssume(), mandate: freshMandate(), cons: { lower: [], upper: [], groups: [] },
-  stats: null, frontier: null, portfolios: [], bt: null, attr: null, stress: null, sens: null, mc: null, spend: null, fx: null,
+  stats: null, frontier: null, portfolios: [], bt: null, attr: null, stress: null, sens: null, mc: null, spend: null, fx: null, rb: null, rbInput: null, rbLog: [],
 };
-const STEPS = ['data', 'assume', 'optimise', 'backtest', 'stress', 'simulate', 'spending', 'currency'];
+const STEPS = ['data', 'assume', 'optimise', 'backtest', 'stress', 'simulate', 'spending', 'currency', 'rebalance'];
 const num = (id, fallback = 0) => { const v = parseFloat($(id).value); return Number.isFinite(v) ? v : fallback; };
 const yearOf = d => d.slice(0, 4);
 const HR = '<hr style="border:0;border-top:1px solid var(--grid);margin:6px 0">';
@@ -103,7 +103,7 @@ function go(step) {
 }
 function draw() {
   if (!S.ds || !S.stats) return;
-  ({ data: drawData, assume: renderAssume, optimise: drawOptimise, backtest: drawBacktest, stress: drawStress, simulate: drawSim, spending: drawSpend, currency: drawFx })[S.step]();
+  ({ data: drawData, assume: renderAssume, optimise: drawOptimise, backtest: drawBacktest, stress: drawStress, simulate: drawSim, spending: drawSpend, currency: drawFx, rebalance: drawRebalance })[S.step]();
 }
 function invalidate() { Object.assign(S, { frontier: null, bt: null, attr: null, stress: null, sens: null, mc: null, spend: null }); }
 
@@ -648,6 +648,124 @@ function drawFx() {
       [lab, ...['Local currency', 'Unhedged', 'Hedged', 'Currency'].map(s => pct(m[s][k]))]).concat([['Interest-rate carry on the hedge (a year)', '', '', signed(X.carry_per_year * X.hedge_ratio), '']]));
 }
 
+// ------------------------------------------------------------------ 9 quarterly rebalance
+function rbTargets() {                     // saved portfolios plus the target of the last recorded decision
+  const out = S.portfolios.map(p => ({ key: 'p:' + p.name, label: p.name, w: normalise(p.weights.map(v => Math.max(0, v))) }));
+  const last = S.rbLog.find(e => e.assets.length === S.ds.assets.length && e.assets.every((a, i) => a === S.ds.assets[i]));
+  if (last) out.unshift({ key: 'last', label: `Last recorded target (${last.target_name || last.decision_date})`, w: last.target });
+  return out;
+}
+function rbTargetWeights() { const t = rbTargets().find(x => x.key === $('rbTarget').value) || rbTargets()[0]; return t ? t.w : null; }
+function rbReadInput() {
+  const vals = [...document.querySelectorAll('#rbInput .rb-cur')].map(i => parseFloat(i.value));
+  S.rbInput = { units: $('rbUnits').value, values: vals };
+  return vals;
+}
+function drawRebalance() {
+  const n = S.ds.assets.length, targets = rbTargets(), cur = $('rbTarget').value;
+  $('rbTarget').innerHTML = targets.map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('') || '<option value="">Create a portfolio in step 3 first</option>';
+  if (targets.some(t => t.key === cur)) $('rbTarget').value = cur;
+  if (!$('rbDate').value) $('rbDate').value = new Date().toISOString().slice(0, 10);
+  const absB = num('rbAbs', 2) / 100, relB = num('rbRel', 25) / 100, tw = rbTargetWeights();
+  $('rbBandHelp').textContent = `Band for each holding = the larger of ±${pct(absB, 1)} and ±${pct(relB, 0)} of its target. Example: a 40% target may drift ±${pct(Math.max(absB, relB * 0.4), 1)}; a 5% target ±${pct(Math.max(absB, relB * 0.05), 1)}.`;
+  const units = $('rbUnits').value, vals = S.rbInput && S.rbInput.units === units && S.rbInput.values.length === n ? S.rbInput.values : new Array(n).fill(NaN);
+  const total = vals.reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
+  table('rbInput', ['Fund / asset class', 'Target', units === 'amounts' ? 'Current amount ($)' : 'Current %', 'Current share', 'Band ±'],
+    S.ds.assets.map((a, i) => {
+      const t = tw ? tw[i] : NaN, band = Math.max(absB, relB * (t || 0));
+      return [`<b>${esc(a)}</b>`, tw ? pct(t, 1) : '–',
+        `<input type="number" class="rb-cur" data-i="${i}" step="${units === 'amounts' ? 100 : 0.5}" min="0" value="${Number.isFinite(vals[i]) ? vals[i] : ''}" style="width:120px" aria-label="Current holding in ${esc(a)}">`,
+        total > 0 && Number.isFinite(vals[i]) ? pct(vals[i] / total, 1) : '–', tw ? pct(band, 1) : '–'];
+    }));
+  $('rbTotal').textContent = total > 0 ? (units === 'amounts' ? `Total: $${Math.round(total).toLocaleString()}` : `Total: ${total.toFixed(1)}% (rescaled to 100%)`) : '';
+  $('rbOut').hidden = !S.rb;
+  if (S.rb) drawRbResult();
+  table('rbLog', ['Decision date', 'Target', 'Rule', 'Outside band', 'Holdings traded', 'Turnover', 'Account', 'Why'],
+    S.rbLog.map(e => [e.decision_date, esc(e.target_name || ''), esc({ breached_to_target: 'Breached to target', to_band_edge: 'To band edge', all_to_target: 'All to target' }[e.policy] || e.policy),
+      e.current.filter((c, i) => Math.abs(c - e.target[i]) > e.band[i] + 1e-12).length, e.trades.filter(t => Math.abs(t) > 1e-6).length,
+      pct(e.trades.reduce((a, b) => a + Math.abs(b), 0) / 2, 1), e.balance ? '$' + Math.round(e.balance).toLocaleString() : '–', esc(e.note || '')]));
+  if (!S.rbLog.length) $('rbLog').innerHTML = '<tbody><tr><td class="empty">No decisions recorded yet.</td></tr></tbody>';
+}
+function rbChart(container, assets, drift, band, breached) {
+  const labW = container.clientWidth < 560 ? 90 : 120, bh = 20, gap = 10;
+  const f = frame(container, assets.length * (bh + gap) + 30, { l: labW, r: 64, t: 4, b: 24 });
+  const m = Math.max(...drift.map(Math.abs), ...band) * 1.25 || 0.01, xs = lin(-m, m, f.x0, f.x1), x0 = xs(0);
+  ticks(-m, m, 4).forEach(t => {
+    el('line', { x1: xs(t), x2: xs(t), y1: f.y1, y2: f.y0, style: 'stroke:var(--grid);stroke-width:1' }, f.svg);
+    el('text', { x: xs(t), y: f.H - 6, 'text-anchor': 'middle', style: TXT(11), text: signed(t, 0) }, f.svg);
+  });
+  assets.forEach((a, i) => {
+    const y = f.y1 + i * (bh + gap), d = drift[i], b = band[i];
+    el('rect', { x: xs(-b), y: y - 3, width: xs(b) - xs(-b), height: bh + 6, rx: 4, style: 'fill:var(--surface-2);stroke:var(--axis);stroke-dasharray:3 3' }, f.svg);
+    el('text', { x: 0, y: y + bh / 2 + 4, style: TXT(12.5, 'var(--text-primary)', 600), text: a }, f.svg);
+    if (Math.abs(d) > 1e-6) {
+      const bar = hBar(f.svg, x0, xs(d), y + 3, bh - 6, `fill:${breached[i] ? 'var(--highlight)' : 'var(--accent)'}`);
+      hoverable(bar, () => `<div class="t">${esc(a)}</div>` + trow('Drift from target', signed(d, 1)) + trow('Band', '±' + pct(b, 1)) + trow('Status', breached[i] ? 'Outside band' : 'Inside band'));
+    }
+    el('text', { x: d >= 0 ? Math.max(xs(d), xs(b)) + 6 : Math.min(xs(d), xs(-b)) - 6, y: y + bh / 2 + 4, 'text-anchor': d >= 0 ? 'start' : 'end',
+      style: TXT(11.5, breached[i] ? 'var(--text-primary)' : 'var(--text-secondary)', breached[i] ? 650 : 400), text: signed(d, 1) }, f.svg);
+  });
+  el('line', { x1: x0, x2: x0, y1: f.y1 - 4, y2: f.y0, style: 'stroke:var(--text-muted);stroke-width:1.5' }, f.svg);
+}
+function drawRbResult() {
+  const R = S.rb, A = S.ds.assets, money = R.balance != null, rk = R.risk;
+  $('rbAction').innerHTML = `<b>${R.n_breached ? 'Rebalance.' : 'No action needed.'}</b> ${esc(R.action)} ${R.n_breached ? 'Rule: ' + esc(R.policy_label.toLowerCase()) + '.' : ''}`;
+  $('rbKpis').innerHTML = tile('Holdings outside their band', `${R.n_breached} of ${A.length}`, R.n_breached ? A.filter((_, i) => R.breached[i]).map(esc).join(', ') : 'all inside') +
+    tile('Share of the account traded', pct(R.turnover, 1), money ? `$${Math.round(R.turnover * R.balance).toLocaleString()} bought and sold each` : 'one-way turnover') +
+    tile('Tracking error vs target', pct(rk.post.tracking_error, 2), `before trading ${pct(rk.current.tracking_error, 2)}`) +
+    tile('Expected return / risk after', `${pct(rk.post.exp_return, 1)} / ${pct(rk.post.volatility, 1)}`, `target ${pct(rk.target.exp_return, 1)} / ${pct(rk.target.volatility, 1)}` + (R.cost ? ` · cost ${pct(R.cost, 3)}` : ''));
+  rbChart($('rbChart'), A, R.drift, R.band, R.breached);
+  const head = ['Fund / asset class', 'Target', 'Current', 'Drift', 'Band ±', 'Status', 'Trade (%)'];
+  if (money) head.push('Trade ($)');
+  head.push('After trading');
+  table('rbTable', head, A.map((a, i) => {
+    const t = R.trades[i], row = [`<b>${esc(a)}</b>`, pct(R.target[i], 1), pct(R.current[i], 1), signed(R.drift[i], 1), pct(R.band[i], 1),
+      `<span class="status" style="${R.breached[i] ? 'color:var(--highlight);font-weight:650' : ''}">${R.breached[i] ? 'Outside band' : 'Inside band'}</span>`,
+      Math.abs(t) < 5e-6 ? '–' : `<b>${t > 0 ? 'Buy' : 'Sell'} ${pct(Math.abs(t), 2)}</b>`];
+    if (money) row.push(Math.abs(t) < 5e-6 ? '–' : `<b>${t > 0 ? 'Buy' : 'Sell'} $${Math.round(Math.abs(R.trade_amounts[i])).toLocaleString()}</b>`);
+    row.push(pct(R.post[i], 1));
+    return row;
+  }));
+}
+async function runRebalance() {
+  const tw = rbTargetWeights();
+  if (!tw) throw new Error('Choose target weights: create a portfolio in step 3, or record a decision first.');
+  const vals = rbReadInput();
+  if (vals.some(v => !Number.isFinite(v) || v < 0)) throw new Error('Enter a current holding (zero is fine) for every fund.');
+  S.rb = await call('rebalance', { ...common(), target: tw, current: vals, units: $('rbUnits').value, abs_band: num('rbAbs', 2) / 100,
+    rel_band: num('rbRel', 25) / 100, policy: $('rbPolicy').value, cost_bps: num('rbCost', 0) });
+  S.rb.targetLabel = $('rbTarget').selectedOptions[0].textContent;
+  drawRebalance();
+}
+async function saveDecision() {
+  const R = S.rb;
+  if (!R) throw new Error('Check drift first.');
+  await api('/api/rebalance/log', { dataset: S.ds.filename, assets: S.ds.assets, target_name: R.targetLabel.replace(/^Last recorded target \((.*)\)$/, '$1'),
+    target: R.target, current: R.current, post: R.post, trades: R.trades, band: R.band, policy: R.policy, balance: R.balance ?? null,
+    note: $('rbNote').value.trim(), decision_date: $('rbDate').value || null });
+  $('rbNote').value = '';
+  await loadRbLog();
+  $('rbAction').insertAdjacentHTML('beforeend', ' <b class="pos">Recorded in the decision log.</b>');
+  drawRebalance();
+}
+async function loadRbLog() { S.rbLog = await (await api('/api/rebalance/log', null, 'GET')).json(); }
+async function loadRbAlert() {
+  const A = await (await api('/api/rebalance/alert', null, 'GET')).json();
+  $('rbAlert').hidden = !A.available;
+  if (A.available) $('rbAlert').innerHTML = `<b>${A.n_breached ? 'Drift alert.' : 'Weekly drift check.'}</b> ${esc(A.message)}` +
+    (A.checked_at ? ` <span class="muted">Checked ${esc(A.checked_at.replace('T', ' ').slice(0, 16))}.</span>` : '');
+  $('rbAlert').style.borderLeftColor = A.n_breached ? 'var(--highlight)' : 'var(--accent)';
+}
+async function useDrifted() {
+  const D = await call('rebalance/drifted');
+  if (!D.available) throw new Error(D.message);
+  $('rbUnits').value = 'weights';
+  S.rbInput = { units: 'weights', values: D.estimated_weights.map(w => +(w * 100).toFixed(2)) };
+  S.rb = null;
+  drawRebalance();
+  $('rbTotal').textContent = `Estimated from your decision of ${D.decision_date} and market moves to ${D.to}. Check against your statement before trading.`;
+}
+
 // ------------------------------------------------------------------ exports
 const exportBody = () => ({ ...common(), constraints: consSpec(), portfolios: plain(S.portfolios), benchmark: $('bBench').value || null, rebalance: $('bRebalance').value, cost_bps: num('bCost') });
 async function exportExcel() { needPortfolios(); await download(`/api/datasets/${S.ds.id}/report.xlsx`, exportBody(), 'portfolio_analysis.xlsx'); }
@@ -739,6 +857,13 @@ async function init() {
   $('fHedge').addEventListener('input', () => { $('fHedgeOut').textContent = `${num('fHedge', 50)}%`; });
   $('fHedge').addEventListener('change', () => { if (S.fx) run(null, runFx); });
   $('exportBtn').addEventListener('click', ev => run(ev.target, exportExcel));
+  $('runRb').addEventListener('click', ev => run(ev.target, runRebalance));
+  $('rbSave').addEventListener('click', ev => run(ev.target, saveDecision));
+  $('rbDrifted').addEventListener('click', ev => run(ev.target, useDrifted));
+  $('rbInput').addEventListener('change', () => { rbReadInput(); drawRebalance(); });
+  ['rbTarget', 'rbAbs', 'rbRel', 'rbPolicy'].forEach(id => $(id).addEventListener('change', () => { rbReadInput(); S.rb = null; drawRebalance(); }));
+  $('rbUnits').addEventListener('change', () => { S.rb = null; S.rbInput = null; drawRebalance(); });
+  $('steps').addEventListener('click', ev => { if (ev.target.dataset.step === 'rebalance' && S.ds) run(null, async () => { await loadRbLog(); await loadRbAlert(); drawRebalance(); }); });
   $('reportBtn').addEventListener('click', () => run(null, async () => openReport()));
   $('reportDlg').addEventListener('close', () => { if ($('reportDlg').returnValue === 'ok') run($('reportBtn'), createReport); });
 
@@ -754,6 +879,13 @@ async function init() {
     if (step === 'assume') return;
     if (step === 'currency') return runFx();
     await runFrontier();
+    if (step === 'rebalance') {
+      await loadRbLog(); await loadRbAlert(); drawRebalance();
+      $('rbTarget').value = 'p:Equal weight';
+      S.rbInput = { units: 'amounts', values: S.ds.assets.map((_, i) => 10000 + (i === 0 ? 15000 : 0) + (i === 1 ? -4000 : 0)) };
+      drawRebalance();
+      return runRebalance();
+    }
     await ({ backtest: async () => { $('bBench').value = 'Equal weight'; await runBacktest(); $('tBench').value = 'Equal weight'; await runAttr(); }, stress: runStress, simulate: runSim, spending: runSpend }[step] || (async () => {}))();
   });
 }

@@ -116,3 +116,17 @@ python tools/update_dc_data.py
 ```
 
 Proxies are ETFs and public rates, not the plan's own funds or the licensed indices, so returns differ by fees and tracking error. Yahoo Finance data is free but unofficial and may change without notice.
+
+## Quarterly rebalance (step 9)
+
+Choose target weights (any portfolio from step 3, or the target of your last recorded decision) and enter today's holdings as dollar amounts or percentages. Each holding has a tolerance band: the larger of an absolute band (default ±2 points) and a share of its target (default ±25%). Only holdings outside their band trigger trades, under one of three rules:
+
+| Rule | What it does |
+|---|---|
+| Breached to target | Trade only the holdings outside their band, back to target; the difference is spread across the rest pro rata |
+| To band edge | Trade breached holdings only back to the edge of their band (least trading) |
+| All to target | If anything is outside its band, bring every holding back to target |
+
+The screen shows drift against the bands, the trades in % and $, turnover, and tracking error before and after. **Record decision** appends the decision, with your note, to `data/decisions/rebalance_log.jsonl`; the log can be downloaded as CSV. **Estimate today's weights from my last decision** rolls the last recorded holdings forward with market moves since then.
+
+Each Saturday the data update also runs a drift check on the last recorded decision. It writes `data/decisions/drift_alert.json` and adds a warning to `update.log` if any holding has moved outside its band. The result appears at the top of step 9.
