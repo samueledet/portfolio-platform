@@ -130,3 +130,7 @@ Choose target weights (any portfolio from step 3, or the target of your last rec
 The screen shows drift against the bands, the trades in % and $, turnover, and tracking error before and after. **Record decision** appends the decision, with your note, to `data/decisions/rebalance_log.jsonl`; the log can be downloaded as CSV. **Estimate today's weights from my last decision** rolls the last recorded holdings forward with market moves since then.
 
 Each Saturday the data update also runs a drift check on the last recorded decision. It writes `data/decisions/drift_alert.json` and adds a warning to `update.log` if any holding has moved outside its band. The result appears at the top of step 9.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
